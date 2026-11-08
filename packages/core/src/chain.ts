@@ -1,4 +1,5 @@
 import { SuiJsonRpcClient, JsonRpcHTTPTransport } from '@mysten/sui/jsonRpc';
+import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { deepbook, mainnetPackageIds, mainnetCoins } from '@mysten/deepbook-v3';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
@@ -10,13 +11,14 @@ export function rpc(env = process.env) {
   const dev = Boolean(env.YOJIMBO_DEV_SUI_RPC);
   if (!dev && !env.TATUM_API_KEY) throw new Error('Setup required: TATUM_API_KEY');
   const url = dev ? env.YOJIMBO_DEV_SUI_RPC! : 'https://sui-mainnet.gateway.tatum.io';
-  const client = new SuiJsonRpcClient({network:'mainnet',transport:new JsonRpcHTTPTransport({url,rpc:dev ? undefined : {headers:{'x-api-key':env.TATUM_API_KEY!}}})});
-  return {client, source:dev ? 'dev RPC (not Tatum)' as const : 'Tatum' as const, url};
+  if (dev) return {client:new SuiGrpcClient({network:'mainnet',baseUrl:url}), source:'dev RPC (not Tatum)' as const, url};
+  return {client:new SuiJsonRpcClient({network:'mainnet',transport:new JsonRpcHTTPTransport({url,rpc:{headers:{'x-api-key':env.TATUM_API_KEY!}}})}), source:'Tatum' as const, url};
 }
 export function chain(owner: string, managerId?: string, env = process.env) {
   const r = rpc(env);
-  const client = r.client.$extend(deepbook({address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey:POOL}} : {}}));
-  return {...r,client};
+  const options = {address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey:POOL}} : undefined};
+  if (r.source === 'dev RPC (not Tatum)') return {...r,client:r.client.$extend(deepbook(options))};
+  return {...r,client:r.client.$extend(deepbook(options))};
 }
 export async function registry(owner: string, env = process.env) {
   const c=chain(owner,undefined,env);
@@ -53,11 +55,18 @@ export async function executeDefence(owner:string,managerId:string,action:Defenc
   if (!Number.isFinite(amountUsdc) || amountUsdc <= 0 || amountUsdc > cap || spentToday+amountUsdc > daily) throw new Error('Defence exceeds per-action or daily USDC cap');
   if (action==='repay' && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
   const {tx,client}=buildDefence(owner,managerId,action,amountUsdc,state,env);
-  const bytes=await tx.build({client});
-  const dryRun=await client.dryRunTransactionBlock({transactionBlock:bytes});
+  if (env.YOJIMBO_DEV_SUI_RPC) {
+    const simulated=await client.core.simulateTransaction({transaction:tx,include:{effects:true}});
+    const status = simulated.FailedTransaction ? {status:'failure',error:simulated.FailedTransaction.status.error?.message ?? 'simulation failed'} : {status:'success'};
+    if (env.YOJIMBO_ALLOW_MAINNET === 'I_ACKNOWLEDGE_REAL_FUNDS') throw new Error('Remove YOJIMBO_DEV_SUI_RPC before mainnet writes');
+    return {mode:'dry-run' as const,status,txDigest:null};
+  }
+  const jsonClient=client as SuiJsonRpcClient;
+  const bytes=await tx.build({client:jsonClient});
+  const dryRun=await jsonClient.dryRunTransactionBlock({transactionBlock:bytes});
   const status=dryRun.effects.status;
-  if (status.status !== 'success') return {mode:'dry-run' as const,status,txDigest:null};
-  if (env.YOJIMBO_ALLOW_MAINNET !== 'I_ACKNOWLEDGE_REAL_FUNDS') return {mode:'dry-run' as const,status,txDigest:null};
-  const result=await client.signAndExecuteTransaction({signer:botKey(env),transaction:tx,options:{showEffects:true}});
+  if (status.status !== 'success' || env.YOJIMBO_ALLOW_MAINNET !== 'I_ACKNOWLEDGE_REAL_FUNDS') return {mode:'dry-run' as const,status,txDigest:null};
+  if (owner !== botKey(env).toSuiAddress()) throw new Error('Bot wallet does not own this manager');
+  const result=await jsonClient.signAndExecuteTransaction({signer:botKey(env),transaction:tx,options:{showEffects:true}});
   return {mode:'mainnet' as const,status:result.effects?.status ?? null,txDigest:result.digest};
 }
