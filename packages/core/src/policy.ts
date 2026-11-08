@@ -2,13 +2,13 @@ export type Action = 'deposit' | 'reduce' | 'repay' | 'ignore';
 export type Mode = 'guard-alone' | 'ask-first';
 export type Memory =
   | { version: 'YOJIMBO_V1'; kind: 'schedule'; id: string; createdAt: string; text: string; recurrence: 'daily' | 'weekdays' | 'once'; start: string; end: string; timezone: string; mode: Mode }
-  | { version: 'YOJIMBO_V1'; kind: 'rule'; id: string; createdAt: string; text: string; action: Action; belowRatio?: number; movePercent?: number; maxUsdc?: number; mode?: Mode; defaultOnTimeout?: Action }
+  | { version: 'YOJIMBO_V1'; kind: 'rule'; id: string; createdAt: string; text: string; action: Action; belowRatio?: number; movePercent?: number; maxUsdc?: number; alertRatio?: number; mode?: Mode; defaultOnTimeout?: Action }
   | { version: 'YOJIMBO_V1'; kind: 'override'; id: string; createdAt: string; text: string; supersedes: string; action: Action; mode: Mode; ratio: number; movePercent: number; verdict: 'correction' | 'approval' }
-  | { version: 'YOJIMBO_V1'; kind: 'event'; id: string; createdAt: string; text: string; beforeRatio: number; afterRatio: number | null; suiPrice: number; mode: Mode; action: Action; txDigest: string | null; outcome: string; ruleIds: string[] }
+  | { version: 'YOJIMBO_V1'; kind: 'event'; id: string; createdAt: string; text: string; beforeRatio: number; afterRatio: number | null; suiPrice: number; movePercent: number; mode: Mode; action: Action; txDigest: string | null; outcome: string; ruleIds: string[] }
   | { version: 'YOJIMBO_V1'; kind: 'summary'; id: string; createdAt: string; text: string; position: string; pnlUsdc: number | null };
 export type Hit = { blobId: string; memory: Memory; distance?: number };
 export type Context = { at: Date; ratio: number; movePercent: number; suiPrice: number };
-export type Decision = { mode: Mode; action: Action; amountUsdc: number; reason: string; quote: string; ruleIds: string[]; recalledBlobIds: string[]; timeoutAction: Action; nextWindow: string | null };
+export type Decision = { mode: Mode; action: Action; amountUsdc: number; reason: string; quote: string; ruleIds: string[]; recalledBlobIds: string[]; timeoutAction: Action; nextWindow: string | null; alertRatio: number };
 export const memoryId = () => crypto.randomUUID();
 export const encodeMemory = (memory: Memory) => JSON.stringify(memory);
 export function decodeMemory(text: string): Memory | null {
@@ -44,12 +44,13 @@ export function decide(hits: Hit[], context: Context, alertRatio = 1.5): Decisio
   const nextWindow = schedules.find(s => !scheduleActive(s, context.at))?.text ?? null;
   const rules = memories.filter((m): m is Extract<Memory,{kind:'rule'}> => m.kind === 'rule');
   const overrides = memories.filter((m): m is Extract<Memory,{kind:'override'}> => m.kind === 'override');
+  const personalAlert = rules.filter(r=>r.alertRatio != null).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]?.alertRatio ?? alertRatio;
   const relevant = overrides.filter(o => o.mode === mode && Math.abs(o.ratio-context.ratio) <= 0.2 && Math.abs(o.movePercent-context.movePercent) <= 5).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0];
   const matched = rules.filter(r => (!r.mode || r.mode === mode) && (r.belowRatio == null || context.ratio <= r.belowRatio) && (r.movePercent == null || Math.abs(context.movePercent) >= r.movePercent));
-  const triggered = context.ratio <= alertRatio || rules.some(r => r.movePercent != null && Math.abs(context.movePercent) >= r.movePercent);
+  const triggered = context.ratio <= personalAlert || rules.some(r => r.movePercent != null && Math.abs(context.movePercent) >= r.movePercent);
   const chosen = matched.sort((a,b)=>(a.belowRatio ?? 99)-(b.belowRatio ?? 99))[0];
   const source = relevant ?? chosen;
   const action: Action = triggered && source ? source.action : 'ignore';
   const quote = source?.text ?? 'No recalled rule permits an action.';
-  return { mode, action, amountUsdc: action === 'ignore' ? 0 : chosen?.maxUsdc ?? 10, reason: triggered ? (source ? `Recalled ${source.kind} ${source.id}` : 'No matching recalled rule') : 'No alert threshold crossed', quote, ruleIds: source ? (source.kind === 'override' ? [source.supersedes,source.id] : [source.id]) : [], recalledBlobIds: hits.map(h=>h.blobId), timeoutAction: chosen?.defaultOnTimeout ?? 'ignore', nextWindow };
+  return { mode, action, amountUsdc: action === 'ignore' ? 0 : chosen?.maxUsdc ?? 10, reason: triggered ? (source ? `Recalled ${source.kind} ${source.id}` : 'No matching recalled rule') : 'No alert threshold crossed', quote, ruleIds: source ? (source.kind === 'override' ? [source.supersedes,source.id] : [source.id]) : [], recalledBlobIds: hits.map(h=>h.blobId), timeoutAction: chosen?.defaultOnTimeout ?? 'ignore', nextWindow, alertRatio: personalAlert };
 }

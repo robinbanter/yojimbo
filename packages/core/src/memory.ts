@@ -10,7 +10,12 @@ export function memoryFor(owner: string, env = process.env) {
   const client = MemWal.create({key: env.MEMWAL_MAINNET_KEY, accountId: env.MEMWAL_MAINNET_ACCOUNT_ID, serverUrl:'https://relayer.memory.walrus.xyz', namespace:`yojimbo-v1:${owner.toLowerCase()}`});
   let queue = Promise.resolve();
   return {
-    recall: async (context: Context): Promise<Hit[]> => retry(async () => (await client.recall({query: contextQuery(context), topK: 40})).results.flatMap(r => { const memory = decodeMemory(r.text); return memory ? [{blobId:r.blob_id,memory,distance:r.distance}] : []; })),
+    recallQuery: async (query: string): Promise<Hit[]> => retry(async () => (await client.recall({query, topK: 40})).results.flatMap(r => { const memory = decodeMemory(r.text); return memory ? [{blobId:r.blob_id,memory,distance:r.distance}] : []; })),
+    recall: async (context: Context): Promise<Hit[]> => {
+      const queries=[contextQuery(context),`Yojimbo owner schedule asleep flying meeting guard alone ask first at ${context.at.toISOString()}`,`Yojimbo newest override correction approval supersedes defence at ratio ${context.ratio.toFixed(2)}`];
+      const batches=await Promise.all(queries.map(query=>retry(async () => (await client.recall({query, topK: 40})).results.flatMap(r => { const memory = decodeMemory(r.text); return memory ? [{blobId:r.blob_id,memory,distance:r.distance}] : []; }))));
+      return [...new Map(batches.flat().map(h=>[h.blobId,h])).values()];
+    },
     remember: (memory: Memory): Promise<string> => { const task = queue.then(() => retry(async () => (await client.rememberAndWait(encodeMemory(memory))).blob_id)); queue = task.then(()=>{},()=>{}); return task; },
   };
 }

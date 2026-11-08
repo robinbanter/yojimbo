@@ -2,11 +2,11 @@ import 'dotenv/config';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { botKey, chain, executeDefence, memoryFor, memoryId, position, registry, decide, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
+import { botKey, chain, executeDefence, createMarginManager, openLong, memoryFor, memoryId, position, registry, decide, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
 
 const port=Number(process.env.PORT ?? 8787);
 const dataFile=resolve(process.cwd(),'data/events.json');
-type EventRow={id:string;at:string;beforeRatio:number;afterRatio:number|null;suiPrice:number;mode:string;action:Action;amountUsdc:number;outcome:string;txDigest:string|null;ruleIds:string[];recalledBlobIds:string[];memoryBlobId?:string;memoryError?:string};
+type EventRow={id:string;at:string;beforeRatio:number;afterRatio:number|null;suiPrice:number;movePercent:number;mode:string;action:Action;amountUsdc:number;outcome:string;txDigest:string|null;ruleIds:string[];recalledBlobIds:string[];memoryBlobId?:string;memoryError?:string};
 let events:EventRow[]=[];
 try { events=JSON.parse(await readFile(dataFile,'utf8')); } catch {}
 const listeners=new Set<ServerResponse>();
@@ -15,6 +15,7 @@ let watcherError:string|null=null;
 let lastPrice:number|null=null;
 let lastActionAt=0;
 let telegramOffset=0;
+let lastSummaryDate=new Date().toISOString().slice(0,10);
 function owner(){return botKey().toSuiAddress();}
 function json(res:ServerResponse,status:number,data:unknown){res.writeHead(status,{'content-type':'application/json','access-control-allow-origin':'*'});res.end(JSON.stringify(data));}
 function emit(type:string,data:unknown){for(const res of listeners)res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);}
@@ -27,19 +28,19 @@ async function recall(ownerAddress:string,ctx:Context){return memoryFor(ownerAdd
 async function snapshot(ownerAddress:string){const p=await position(ownerAddress);if(!p.state||!p.price||!p.managerId)throw new Error('Setup required: bot-owned MarginManager');return p;}
 async function context(ownerAddress:string){const p=await snapshot(ownerAddress);return {p,ctx:{at:new Date(),ratio:p.state!.riskRatio,movePercent:lastPrice ? (p.price!-lastPrice)/lastPrice*100 : 0,suiPrice:p.price!}};}
 function spentToday(){const day=new Date().toISOString().slice(0,10);return events.filter(e=>e.at.startsWith(day)&&e.outcome==='mainnet success').reduce((n,e)=>n+e.amountUsdc,0);}
-async function assess(ownerAddress:string){const {p,ctx}=await context(ownerAddress);const hits=await recall(ownerAddress,ctx);const alerts=hits.filter(h=>h.memory.kind==='rule'&&h.memory.belowRatio&&h.memory.text.toLowerCase().includes('alert')).map(h=>(h.memory as Extract<Memory,{kind:'rule'}>).belowRatio!);const decision=decide(hits,ctx,alerts[0]??1.5);return {p,ctx,hits,decision};}
+async function assess(ownerAddress:string){const {p,ctx}=await context(ownerAddress);const hits=await recall(ownerAddress,ctx);const decision=decide(hits,ctx);return {p,ctx,hits,decision};}
 async function remember(ownerAddress:string,memory:Memory){const blobId=await memoryFor(ownerAddress).remember(memory);emit('memory',{blobId,memory});return blobId;}
 async function act(ownerAddress:string,decision:Decision,ctx:Context,managerId:string,state:any,forceDryRun=false){
  if(decision.action==='ignore')return {outcome:'ignored',decision};
  const amount=Math.min(decision.amountUsdc,Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10));
  const env=forceDryRun?{...process.env,YOJIMBO_ALLOW_MAINNET:''}:process.env;
- const result=await executeDefence(ownerAddress,managerId,decision.action,amount,{baseAsset:state.baseAsset,quoteAsset:state.quoteAsset,quoteDebt:state.quoteDebt,price:ctx.suiPrice},spentToday(),env);
+ const result=await executeDefence(ownerAddress,managerId,decision.action,amount,{baseAsset:state.baseAsset,baseDebt:state.baseDebt,quoteAsset:state.quoteAsset,quoteDebt:state.quoteDebt,price:ctx.suiPrice},spentToday(),env);
  let afterRatio:null|number=null;
  if(result.mode==='mainnet'){try{afterRatio=(await snapshot(ownerAddress)).state!.riskRatio;}catch{}}
  const outcome=result.mode==='mainnet'&&result.status?.status==='success'?'mainnet success':`${result.mode} ${result.status?.status??'unknown'}`;
- const row:EventRow={id:memoryId(),at:ctx.at.toISOString(),beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,mode:decision.mode,action:decision.action,amountUsdc:amount,outcome,txDigest:result.txDigest,ruleIds:decision.ruleIds,recalledBlobIds:decision.recalledBlobIds};
+ const row:EventRow={id:memoryId(),at:ctx.at.toISOString(),beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,amountUsdc:amount,outcome,txDigest:result.txDigest,ruleIds:decision.ruleIds,recalledBlobIds:decision.recalledBlobIds};
  events.unshift(row);await persist();emit('event',row);
- const memory:Memory={version:'YOJIMBO_V1',kind:'event',id:row.id,createdAt:row.at,text:`${decision.action}: ${outcome}. ${decision.quote}`,beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,mode:decision.mode,action:decision.action,txDigest:result.txDigest,outcome,ruleIds:decision.ruleIds};
+ const memory:Memory={version:'YOJIMBO_V1',kind:'event',id:row.id,createdAt:row.at,text:`${decision.action}: ${outcome}. ${decision.quote}`,beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,txDigest:result.txDigest,outcome,ruleIds:decision.ruleIds};
  try{row.memoryBlobId=await remember(ownerAddress,memory);await persist();}catch(e){row.memoryError=safeError(e);await persist();}
  const txLink=result.txDigest?` https://suiscan.xyz/mainnet/tx/${result.txDigest}`:'';
  await notify(`Yojimbo ${outcome}: ${decision.action} ${amount} USDC at risk ratio ${ctx.ratio.toFixed(3)}. “${decision.quote}”${txLink}`);
@@ -48,16 +49,18 @@ async function act(ownerAddress:string,decision:Decision,ctx:Context,managerId:s
 async function recordOverride(ownerAddress:string,args:any){
  const latest=events[0];if(!latest)throw new Error('No defence event to override');
  const action:Action=['deposit','reduce','repay','ignore'].includes(args.action)?args.action:latest.action;
- const memory:Memory={version:'YOJIMBO_V1',kind:'override',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text||'Owner override'),supersedes:String(args.supersedes||latest.ruleIds.at(-1)||latest.id),action,mode:latest.mode as any,ratio:latest.beforeRatio,movePercent:Number(args.movePercent??0),verdict:args.verdict==='approval'?'approval':'correction'};
+ const memory:Memory={version:'YOJIMBO_V1',kind:'override',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text||'Owner override'),supersedes:String(args.supersedes||latest.ruleIds.at(-1)||latest.id),action,mode:latest.mode as any,ratio:latest.beforeRatio,movePercent:Number(args.movePercent??latest.movePercent??0),verdict:args.verdict==='approval'?'approval':'correction'};
  const blobId=await remember(ownerAddress,memory);return {blobId,memory};
 }
 async function tool(name:string,args:any,ownerAddress:string){
  if(name==='get_position')return position(ownerAddress);
- if(name==='get_risk')return registry(ownerAddress);
- if(name==='list_rules'){const {hits,decision}=await assess(ownerAddress);return {items:hits.filter(h=>['rule','schedule','override'].includes(h.memory.kind)),recalled:decision.recalledBlobIds};}
+ if(name==='get_risk')return {position:await position(ownerAddress),thresholds:await registry(ownerAddress)};
+ if(name==='create_margin_manager'){const existing=await position(ownerAddress);if(existing.managerId)throw new Error('Bot already has a MarginManager');return createMarginManager(ownerAddress);}
+ if(name==='open_position'){const p=await snapshot(ownerAddress);if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)throw new Error('Position already has debt');return openLong(ownerAddress,p.managerId!,Number(args.depositUsdc),Number(args.borrowUsdc),p.price!);}
+ if(name==='list_rules'){const hits=await memoryFor(ownerAddress).recallQuery('Yojimbo all schedules rules overrides and owner preferences');return {items:hits.filter(h=>['rule','schedule','override'].includes(h.memory.kind)),recalled:hits.map(h=>h.blobId)};}
  if(name==='add_rule'){
   if(!['deposit','reduce','repay','ignore'].includes(args.action))throw new Error('Invalid action');
-  const memory:Memory={version:'YOJIMBO_V1',kind:'rule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),action:args.action,belowRatio:args.belowRatio,movePercent:args.movePercent,maxUsdc:args.maxUsdc,mode:args.mode,defaultOnTimeout:args.defaultOnTimeout};return {blobId:await remember(ownerAddress,memory),memory};
+  const memory:Memory={version:'YOJIMBO_V1',kind:'rule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),action:args.action,belowRatio:args.belowRatio,movePercent:args.movePercent,maxUsdc:args.maxUsdc,alertRatio:args.alertRatio,mode:args.mode,defaultOnTimeout:args.defaultOnTimeout};return {blobId:await remember(ownerAddress,memory),memory};
  }
  if(name==='add_schedule'){
   const memory:Memory={version:'YOJIMBO_V1',kind:'schedule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),recurrence:args.recurrence,start:String(args.start),end:String(args.end),timezone:String(args.timezone||'Asia/Kolkata'),mode:args.mode};return {blobId:await remember(ownerAddress,memory),memory};
@@ -71,8 +74,8 @@ async function tool(name:string,args:any,ownerAddress:string){
  throw new Error(`Unknown tool ${name}`);
 }
 const toolSchemas=[
- ['get_position','Read the bot-owned DeepBook Margin position',{}],['get_risk','Read SUI/USDC margin pool risk thresholds',{}],['list_rules','Recall rules, schedules and overrides from Walrus Memory',{}],
- ['add_rule','Remember a defence rule',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},belowRatio:{type:'number'},movePercent:{type:'number'},maxUsdc:{type:'number'},mode:{type:'string',enum:['guard-alone','ask-first']},defaultOnTimeout:{type:'string',enum:['deposit','reduce','repay','ignore']}}],
+ ['get_position','Read the bot-owned DeepBook Margin position',{}],['get_risk','Read position risk and SUI/USDC margin pool thresholds',{}],['create_margin_manager','Create a bot-owned SUI/USDC MarginManager, dry-run unless mainnet enabled',{}],['open_position','Deposit USDC, borrow USDC and buy SUI to open a long; dry-run unless mainnet enabled',{depositUsdc:{type:'number'},borrowUsdc:{type:'number'}}],['list_rules','Recall rules, schedules and overrides from Walrus Memory',{}],
+ ['add_rule','Remember a defence rule',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},belowRatio:{type:'number'},movePercent:{type:'number'},maxUsdc:{type:'number'},alertRatio:{type:'number'},mode:{type:'string',enum:['guard-alone','ask-first']},defaultOnTimeout:{type:'string',enum:['deposit','reduce','repay','ignore']}}],
  ['add_schedule','Remember a recurring or one-time schedule',{text:{type:'string'},recurrence:{type:'string',enum:['daily','weekdays','once']},start:{type:'string'},end:{type:'string'},timezone:{type:'string'},mode:{type:'string',enum:['guard-alone','ask-first']}}],
  ['record_override','Remember owner correction or approval for last defence',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},verdict:{type:'string',enum:['correction','approval']}}],
  ['simulate_defence','Recall rules and dry-run current defence',{}],['defend','Recall rules and execute current defence, gated by YOJIMBO_ALLOW_MAINNET',{}]
@@ -116,6 +119,16 @@ async function watch(){
   watcherError=null;
  }catch(e){watcherError=safeError(e);emit('status',{watcherError});}
 }
+async function dailySummary(){
+ const today=new Date().toISOString().slice(0,10);
+ if(today===lastSummaryDate)return;
+ const yesterday=lastSummaryDate;lastSummaryDate=today;
+ try{const address=owner();const p=await position(address);const daily=events.filter(e=>e.at.startsWith(yesterday));
+  const text=`${yesterday}: ${daily.length} defence events. ${daily.map(e=>`${e.action} ${e.outcome}`).join('; ')||'No defences'}. Position ratio ${p.state?.riskRatio??'unavailable'}. P&L unavailable without a cost basis.`;
+  await remember(address,{version:'YOJIMBO_V1',kind:'summary',id:memoryId(),createdAt:new Date().toISOString(),text,position:p.managerId?JSON.stringify({managerId:p.managerId,riskRatio:p.state?.riskRatio,baseAsset:p.state?.baseAsset,quoteAsset:p.state?.quoteAsset,baseDebt:p.state?.baseDebt,quoteDebt:p.state?.quoteDebt}):'No manager',pnlUsdc:null});
+  await notify(`Yojimbo daily summary: ${text}`);
+ }catch(e){emit('status',{summaryError:safeError(e)});}
+}
 async function telegramWorker(){
  if(!process.env.TELEGRAM_BOT_TOKEN||!process.env.TELEGRAM_CHAT_ID)return;
  const token=process.env.TELEGRAM_BOT_TOKEN;
@@ -132,11 +145,11 @@ const server=createServer(async(req,res)=>{try{
  const path=new URL(req.url||'/',`http://localhost:${port}`).pathname;
  if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST','access-control-allow-headers':'content-type'});return res.end();}
  if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','access-control-allow-origin':'*'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
- if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null;if(address){try{balance=(await chain(address).client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'})).balance.balance;}catch{}}
-  return json(res,200,{rpc:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,mainnetWrites:process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
+ if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null,usdcBalance:string|null=null;if(address){try{const client=chain(address).client;const balances=await Promise.all([client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'}),client.core.getBalance({owner:address,coinType:'0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'})]);balance=balances[0].balance.balance;usdcBalance=balances[1].balance.balance;}catch{}}
+  return json(res,200,{rpc:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
  if(path==='/registry')return json(res,200,await registry(process.env.YOJIMBO_BOT_KEY?owner():'0x1'));
  if(path==='/position')return json(res,200,await position(owner()));
- if(path==='/memory'){const address=owner();const ctx:Context={at:new Date(),ratio:1.5,movePercent:0,suiPrice:0};const hits=await recall(address,ctx);return json(res,200,{hits,decision:decide(hits,ctx)});}
+ if(path==='/memory'){const address=owner();const hits=await memoryFor(address).recallQuery('Yojimbo all schedules rules overrides and owner preferences');let currentDecision:Decision|null=null;try{const {ctx}=await context(address);currentDecision=decide(await recall(address,ctx),ctx);}catch{}return json(res,200,{hits,decision:currentDecision});}
  if(path==='/events')return json(res,200,{events});
  if(path==='/chat'&&req.method==='POST'){const data=await body(req);return chat(res,String(data.message||''));}
  if(path==='/decision'&&req.method==='POST'){const data=await body(req);const item=pending.get(data.id);if(!item)return json(res,404,{error:'Approval request expired'});clearTimeout(item.timer);pending.delete(data.id);
@@ -145,4 +158,4 @@ const server=createServer(async(req,res)=>{try{
  return json(res,404,{error:'Not found'});
 }catch(e){return json(res,500,{error:safeError(e)});}});
 server.listen(port,()=>console.log(`Yojimbo server listening on ${port}`));
-setInterval(watch,15000);setTimeout(watch,1000);void telegramWorker();
+setInterval(watch,15000);setTimeout(watch,1000);setInterval(dailySummary,60000);void telegramWorker();
