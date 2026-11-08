@@ -1,0 +1,13 @@
+# Testing record — 2026-11-09
+
+- `pnpm build`: 3 packages built, 0 errors.
+- `pnpm test`: 3 pure policy tests passed, 0 failed. They cover schedule-based guard-alone versus ask-first, a newest similar override changing the next action, and an unrelated override being ignored.
+- `YOJIMBO_DEV_SUI_RPC=https://fullnode.mainnet.sui.io:443 pnpm test:live`: 1 live registry check passed. SUI/USDC enabled; liquidation 1.1, minimum borrow 1.2499, minimum withdraw 2.0; SUI and USDC margin pool IDs matched the published IDs. The SDK used margin v8 package `0x40fa183b5602cd0f6c4d7b16c08766ad8d7d581608fbe3b2570fe72ab4f5625f`.
+- `pnpm dev` with the dev override: Vite returned HTTP 200 at `localhost:5173`; `GET /status` returned the setup states; `GET /registry` returned the live values above. Server and UI launch succeeded.
+- Manager state read: **0**, blocked because `YOJIMBO_BOT_KEY` was absent.
+- Deposit dry-run: **0**, blocked because no funded bot-owned MarginManager was available. No successful defence is claimed.
+- Tatum transport read: **0**, blocked because `TATUM_API_KEY` was absent.
+- Walrus write/recall: **0**, blocked because delegate credentials were absent.
+- Telegram delivery: **0**, optional token and chat ID absent.
+
+Public Sui fullnode JSON-RPC returned “Method not found” during the first live attempt; the explicit dev override now uses gRPC. This does not validate the Tatum gateway or funded-wallet transaction path.

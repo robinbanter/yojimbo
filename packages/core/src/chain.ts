@@ -53,7 +53,7 @@ export function buildDefence(owner:string,managerId:string,action:DefenceAction,
 }
 export async function executeDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:{baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number},spentToday:number,env=process.env) {
   const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC ?? 10), daily=Number(env.YOJIMBO_DAILY_USDC ?? 30);
-  if (!Number.isFinite(amountUsdc) || amountUsdc <= 0 || amountUsdc > cap || spentToday+amountUsdc > daily) throw new Error('Defence exceeds per-action or daily USDC cap');
+  if (![cap,daily,amountUsdc,spentToday].every(v=>Number.isFinite(v)&&v>=0) || cap<=0 || daily<=0 || amountUsdc<=0 || amountUsdc>cap || spentToday+amountUsdc>daily) throw new Error('Defence exceeds per-action or daily USDC cap');
   if (action==='repay' && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
   const {tx,client}=buildDefence(owner,managerId,action,amountUsdc,state,env);
   if (env.YOJIMBO_DEV_SUI_RPC) {
@@ -93,7 +93,7 @@ export async function createMarginManager(owner:string,env=process.env){
 }
 export async function openLong(owner:string,managerId:string,depositUsdc:number,borrowUsdc:number,price:number,env=process.env){
   const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC??10);
-  if(![depositUsdc,borrowUsdc,price].every(v=>Number.isFinite(v)&&v>0)||depositUsdc>cap||borrowUsdc>cap)throw new Error('Invalid amount or exceeds per-action USDC cap');
+  if(!Number.isFinite(cap)||cap<=0||![depositUsdc,borrowUsdc,price].every(v=>Number.isFinite(v)&&v>0)||depositUsdc>cap||borrowUsdc>cap)throw new Error('Invalid amount or exceeds per-action USDC cap');
   const c=chain(owner,managerId,env);const tx=new Transaction();tx.setSender(owner);
   tx.add(c.client.deepbook.marginManager.depositQuote({managerKey:'BOT',amount:depositUsdc}));
   tx.add(c.client.deepbook.marginManager.borrowQuote('BOT',borrowUsdc));

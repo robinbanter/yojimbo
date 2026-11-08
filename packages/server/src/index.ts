@@ -17,7 +17,7 @@ let lastActionAt=0;
 let telegramOffset=0;
 let lastSummaryDate=new Date().toISOString().slice(0,10);
 function owner(){return botKey().toSuiAddress();}
-function json(res:ServerResponse,status:number,data:unknown){res.writeHead(status,{'content-type':'application/json','access-control-allow-origin':'*'});res.end(JSON.stringify(data));}
+function json(res:ServerResponse,status:number,data:unknown){res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(data));}
 function emit(type:string,data:unknown){for(const res of listeners)res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);}
 async function body(req:IncomingMessage){let text='';for await(const chunk of req){text+=chunk;if(text.length>100_000)throw new Error('Request too large');}return JSON.parse(text||'{}');}
 function safeError(e:unknown){const message=String(e);return /API_KEY|BOT_KEY|ACCOUNT_ID|Setup required/.test(message)?message.replace(/([A-Za-z_]+)=\S+/g,'$1=[redacted]'):message.slice(0,400);}
@@ -87,7 +87,7 @@ async function openRouter(messages:any[],tools:any[]=toolSchemas){
  return (await response.json()).choices[0].message;
 }
 async function chat(res:ServerResponse,prompt:string){
- res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','access-control-allow-origin':'*'});
+ res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});
  const send=(type:string,data:unknown)=>res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
  try{
   const address=owner();
@@ -143,8 +143,10 @@ async function telegramWorker(){
 }
 const server=createServer(async(req,res)=>{try{
  const path=new URL(req.url||'/',`http://localhost:${port}`).pathname;
- if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-origin':'*','access-control-allow-methods':'GET,POST','access-control-allow-headers':'content-type'});return res.end();}
- if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','access-control-allow-origin':'*'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
+ const origin=req.headers.origin;
+ if(origin && !['http://localhost:5173','http://127.0.0.1:5173'].includes(origin))return json(res,403,{error:'Origin not allowed'});
+ if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
+ if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
  if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null,usdcBalance:string|null=null;if(address){try{const client=chain(address).client;const balances=await Promise.all([client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'}),client.core.getBalance({owner:address,coinType:'0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'})]);balance=balances[0].balance.balance;usdcBalance=balances[1].balance.balance;}catch{}}
   return json(res,200,{rpc:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
  if(path==='/registry')return json(res,200,await registry(process.env.YOJIMBO_BOT_KEY?owner():'0x1'));
@@ -157,5 +159,5 @@ const server=createServer(async(req,res)=>{try{
   return json(res,200,await act(item.owner,{...item.decision,action},item.context,item.managerId,item.state));}
  return json(res,404,{error:'Not found'});
 }catch(e){return json(res,500,{error:safeError(e)});}});
-server.listen(port,()=>console.log(`Yojimbo server listening on ${port}`));
+server.listen(port,'127.0.0.1',()=>console.log(`Yojimbo server listening on localhost:${port}`));
 setInterval(watch,15000);setTimeout(watch,1000);setInterval(dailySummary,60000);void telegramWorker();
