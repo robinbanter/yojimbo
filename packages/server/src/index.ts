@@ -134,7 +134,7 @@ const server=createServer(async(req,res)=>{try{
  if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','access-control-allow-origin':'*'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
  if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null;if(address){try{balance=(await chain(address).client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'})).balance.balance;}catch{}}
   return json(res,200,{rpc:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,mainnetWrites:process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
- if(path==='/registry')return json(res,200,await registry(owner()));
+ if(path==='/registry')return json(res,200,await registry(process.env.YOJIMBO_BOT_KEY?owner():'0x1'));
  if(path==='/position')return json(res,200,await position(owner()));
  if(path==='/memory'){const address=owner();const ctx:Context={at:new Date(),ratio:1.5,movePercent:0,suiPrice:0};const hits=await recall(address,ctx);return json(res,200,{hits,decision:decide(hits,ctx)});}
  if(path==='/events')return json(res,200,{events});
