@@ -53,8 +53,8 @@ async function recordOverride(ownerAddress:string,args:any){
  const blobId=await remember(ownerAddress,memory);return {blobId,memory};
 }
 async function tool(name:string,args:any,ownerAddress:string){
- if(name==='get_position')return position(ownerAddress);
- if(name==='get_risk')return {position:await position(ownerAddress),thresholds:await registry(ownerAddress)};
+ if(name==='get_position')return position(String(args.owner||ownerAddress));
+ if(name==='get_risk'){const target=String(args.owner||ownerAddress);return {position:await position(target),thresholds:await registry(target)};}
  if(name==='create_margin_manager'){const existing=await position(ownerAddress);if(existing.managerId)throw new Error('Bot already has a MarginManager');return createMarginManager(ownerAddress);}
  if(name==='open_position'){const p=await snapshot(ownerAddress);if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)throw new Error('Position already has debt');return openLong(ownerAddress,p.managerId!,Number(args.depositUsdc),Number(args.borrowUsdc),p.price!);}
  if(name==='list_rules'){const hits=await memoryFor(ownerAddress).recallQuery('Yojimbo all schedules rules overrides and owner preferences');return {items:hits.filter(h=>['rule','schedule','override'].includes(h.memory.kind)),recalled:hits.map(h=>h.blobId)};}
@@ -74,7 +74,7 @@ async function tool(name:string,args:any,ownerAddress:string){
  throw new Error(`Unknown tool ${name}`);
 }
 const toolSchemas=[
- ['get_position','Read the bot-owned DeepBook Margin position',{}],['get_risk','Read position risk and SUI/USDC margin pool thresholds',{}],['create_margin_manager','Create a bot-owned SUI/USDC MarginManager, dry-run unless mainnet enabled',{}],['open_position','Deposit USDC, borrow USDC and buy SUI to open a long; dry-run unless mainnet enabled',{depositUsdc:{type:'number'},borrowUsdc:{type:'number'}}],['list_rules','Recall rules, schedules and overrides from Walrus Memory',{}],
+ ['get_position','Read a DeepBook Margin position by owner address, defaulting to bot owner',{owner:{type:'string'}}],['get_risk','Read position risk and SUI/USDC margin pool thresholds by owner address',{owner:{type:'string'}}],['create_margin_manager','Create a bot-owned SUI/USDC MarginManager, dry-run unless mainnet enabled',{}],['open_position','Deposit USDC, borrow USDC and buy SUI to open a long; dry-run unless mainnet enabled',{depositUsdc:{type:'number'},borrowUsdc:{type:'number'}}],['list_rules','Recall rules, schedules and overrides from Walrus Memory',{}],
  ['add_rule','Remember a defence rule',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},belowRatio:{type:'number'},movePercent:{type:'number'},maxUsdc:{type:'number'},alertRatio:{type:'number'},mode:{type:'string',enum:['guard-alone','ask-first']},defaultOnTimeout:{type:'string',enum:['deposit','reduce','repay','ignore']}}],
  ['add_schedule','Remember a recurring or one-time schedule',{text:{type:'string'},recurrence:{type:'string',enum:['daily','weekdays','once']},start:{type:'string'},end:{type:'string'},timezone:{type:'string'},mode:{type:'string',enum:['guard-alone','ask-first']}}],
  ['record_override','Remember owner correction or approval for last defence',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},verdict:{type:'string',enum:['correction','approval']}}],
