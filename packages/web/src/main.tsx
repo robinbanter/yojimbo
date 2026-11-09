@@ -135,6 +135,7 @@ function App() {
   const [dryBusy, setDryBusy] = useState(false);
   const [approved, setApproved] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
+  const [journeyOpen, setJourneyOpen] = useState(false);
 
   const refresh = async () => {
     const requests: [string, string, (v: any) => void][] = [
@@ -343,6 +344,29 @@ function App() {
       ]
     : [];
   const watchError = source === 'watch' ? errors.watch || errors.managers : errors.position;
+  if (status) keys.push({ label: 'Writes', value: status.mainnetWrites ? 'Mainnet enabled' : 'Dry-run only (YOJIMBO_ALLOW_MAINNET unset)', level: status.mainnetWrites ? 'ok' : 'warn' });
+  const toChat = (preset?: string) => {
+    document.getElementById('chat')?.scrollIntoView({ behavior: RM() ? 'auto' : 'smooth', block: 'center' });
+    if (preset) void send(preset);
+    else (document.querySelector('.composer input') as HTMLInputElement | null)?.focus({ preventScroll: true });
+  };
+  const steps4 = journeySteps(status, position, kept.length, !!memorySetup);
+  const journey = (variant: 'panel' | 'inline') => (
+    <Journey
+      variant={variant}
+      status={status}
+      position={position}
+      positionError={errors.position}
+      registry={registry}
+      caps={watched?.caps}
+      rulesCount={kept.length}
+      memorySetup={!!memorySetup}
+      states={steps4}
+      busy={busy}
+      onRules={toChat}
+      onDone={() => void refresh()}
+    />
+  );
 
   return (
     <div className="app">
@@ -380,14 +404,37 @@ function App() {
         </header>
 
         <div className="console-head">
-          <h1>
-            A bodyguard for your leverage <em>while you sleep.</em>
-          </h1>
-          <p>
-            <span className="live-dot" aria-hidden="true" /> DeepBook Margin · SUI/USDC · read live from Sui mainnet every 15 s
-            {status && <span className="mode-inline"> · {status.mainnetWrites ? 'real funds' : 'dry-run only'}</span>}
-          </p>
+          <div className="console-title">
+            <h1>
+              A bodyguard for your leverage <em>while you sleep.</em>
+            </h1>
+            <p>
+              <span className="live-dot" aria-hidden="true" /> DeepBook Margin · SUI/USDC · read live from Sui mainnet every 15 s
+              {status && <span className="mode-inline"> · {status.mainnetWrites ? 'real funds' : 'dry-run only'}</span>}
+            </p>
+          </div>
+          <button className="stepper" aria-expanded={journeyOpen} aria-controls="journey" onClick={() => setJourneyOpen((v) => !v)}>
+            <span className="stepper-label">
+              Get guarded in 4 steps
+              <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className={journeyOpen ? 'up' : ''}>
+                <path d="m3 4.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <span className="stepper-steps">
+              {JOURNEY_SHORT.map((t, i) => (
+                <span key={t} className={`sp s-${steps4[i]}`}>
+                  <i aria-hidden="true">{steps4[i] === 'done' ? <Check /> : i + 1}</i>
+                  {t}
+                </span>
+              ))}
+            </span>
+          </button>
         </div>
+        {journeyOpen && (
+          <section className="journey-panel" id="journey" aria-label="Get guarded in 4 steps">
+            {journey('panel')}
+          </section>
+        )}
 
         <main className="console" id="console">
           <section className="rail panel" aria-labelledby="guard-title">
@@ -574,19 +621,13 @@ function App() {
                 <span className="s3" />
                 <p>Reading {short(watchId)} from Sui mainnet…</p>
               </div>
+            ) : source === 'bot' ? (
+              journey('inline')
             ) : (
               <div className="inst-empty">
-                <img src={source === 'bot' ? '/art/yojimbo-seal-wallet.webp' : '/art/yojimbo-lantern-safe.webp'} alt="" width={140} height={140} />
-                <h3>{source === 'bot' && /Setup required/.test(errors.position ?? '') ? 'Setup required' : 'Nothing to guard yet'}</h3>
-                <p>
-                  {(source === 'bot' && /YOJIMBO_BOT_KEY/.test(errors.position ?? '')
-                    ? 'Yojimbo needs its own bot wallet key before it can guard a position it owns.'
-                    : watchError) ||
-                    (source === 'watch'
-                      ? 'Pick a manager on the left or paste its ID.'
-                      : 'No bot-owned MarginManager found. Fund the bot wallet and open a small SUI/USDC position to start guarding.')}
-                </p>
-                {source === 'bot' && /YOJIMBO_BOT_KEY/.test(errors.position ?? '') && <code className="vars">YOJIMBO_BOT_KEY</code>}
+                <img src="/art/yojimbo-lantern-safe.webp" alt="" width={140} height={140} />
+                <h3>Nothing to guard yet</h3>
+                <p>{watchError || 'Pick a manager on the left or paste its ID.'}</p>
               </div>
             )}
             {visibleRegistry && (
@@ -856,6 +897,251 @@ function App() {
         </footer>
       </section>
     </div>
+  );
+}
+
+type StepState = 'done' | 'todo' | 'setup' | 'loading';
+const JOURNEY_SHORT = ['Fund', 'Open', 'Rules', 'Watch'];
+function journeySteps(status: Status | null, position: any, rules: number, memorySetup: boolean): StepState[] {
+  if (!status) return ['loading', 'loading', 'loading', 'loading'];
+  const wallet = !!status.wallet;
+  const funded = wallet && Number(status.balanceMist) > 0 && Number(status.usdcBalance) > 0;
+  const open = wallet && (Number(position?.state?.quoteDebt) > 0 || Number(position?.state?.baseDebt) > 0);
+  return [
+    !wallet ? 'setup' : funded ? 'done' : 'todo',
+    !wallet ? 'setup' : open ? 'done' : 'todo',
+    memorySetup ? 'setup' : rules > 0 ? 'done' : 'todo',
+    open && status.mainnetWrites ? 'done' : !wallet ? 'setup' : 'todo',
+  ];
+}
+const STATE_WORD: Record<StepState, string> = { done: 'Done', todo: 'To do', setup: 'Setup required', loading: 'Checking…' };
+const RULE_CHIPS = ['I sleep 01:00 to 08:00 IST every day', 'Flying Tuesday 10:00 to 16:00 IST', 'At night add collateral, never close the position'];
+
+async function post(path: string, data: unknown) {
+  const r = await fetch(`/api${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data) });
+  const v = await r.json();
+  if (!r.ok) throw new Error(String(v.error || `HTTP ${r.status}`).replace(/^Error:\s*/, ''));
+  return v;
+}
+const outcome = (r: any) => {
+  const failed = r?.status?.status === 'failure' ? ` · dry run failed: ${r.status.error ?? 'unknown error'}` : '';
+  return `${r.note ?? r.mode}${r.txDigest ? ` · tx ${short(String(r.txDigest))}` : ''}${failed}`;
+};
+
+/** The newcomer's path, with live status on every step: fund the bot wallet, open the position, give it rules,
+ * let it watch. Yojimbo acts only through its own wallet because DeepBook Margin keeps a manager's caps inside the
+ * MarginManager and checks the sender, so they cannot be delegated to the user's wallet. */
+function Journey(props: {
+  variant: 'panel' | 'inline';
+  status: Status | null;
+  position: any;
+  positionError?: string;
+  registry: any;
+  caps?: { perActionUsdc: number; dailyUsdc: number };
+  rulesCount: number;
+  memorySetup: boolean;
+  states: StepState[];
+  busy: boolean;
+  onRules: (preset?: string) => void;
+  onDone: () => void;
+}) {
+  const { status, position, registry, caps, states } = props;
+  const [deposit, setDeposit] = useState('10');
+  const [borrow, setBorrow] = useState('10');
+  const [copied, setCopied] = useState(false);
+  const [run, setRun] = useState<{ busy: boolean; lines: { label: string; text: string; ok: boolean }[] } | null>(null);
+  const wallet = status?.wallet ?? null;
+  const d = Number(deposit),
+    b = Number(borrow);
+  const valid = Number.isFinite(d) && Number.isFinite(b) && d > 0 && b > 0;
+  const leverage = valid ? (d + b) / d : null;
+  const ratio = valid ? (d + b) / b : null;
+  const minBorrow: number | undefined = registry?.minBorrow;
+  const liq: number | undefined = registry?.liquidation;
+  const cap = caps?.perActionUsdc;
+  const problem = !valid
+    ? 'Enter both amounts in USDC.'
+    : cap != null && (d > cap || b > cap)
+      ? `Each amount must be at most ${cap} USDC, the per-action cap (YOJIMBO_MAX_DEFENCE_USDC).`
+      : minBorrow != null && ratio! < minBorrow
+        ? `A ${ratio!.toFixed(2)} ratio is under the pool's minimum borrow ratio ${minBorrow.toFixed(2)}. Borrow less.`
+        : '';
+  const hasManager = !!position?.managerId;
+  const copy = async () => {
+    if (!wallet) return;
+    try {
+      await navigator.clipboard.writeText(wallet);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  };
+  const open = async () => {
+    if (!wallet || problem || run?.busy) return;
+    const lines: { label: string; text: string; ok: boolean }[] = [];
+    setRun({ busy: true, lines });
+    try {
+      if (!hasManager) {
+        const r = await post('/bot/create', {});
+        lines.push({ label: 'Create the MarginManager', text: outcome(r), ok: r.mode === 'mainnet' });
+        if (r.mode !== 'mainnet') {
+          lines.push({ label: 'Deposit, borrow and buy SUI', text: 'Not run: the manager only exists on chain once the create transaction is sent.', ok: false });
+          return;
+        }
+      }
+      const o = await post('/bot/open', { depositUsdc: d, borrowUsdc: b });
+      lines.push({ label: 'Deposit, borrow and buy SUI', text: outcome(o), ok: o.mode === 'mainnet' });
+    } catch (e) {
+      lines.push({ label: 'Refused', text: String((e as Error).message ?? e), ok: false });
+    } finally {
+      setRun({ busy: false, lines: [...lines] });
+      props.onDone();
+    }
+  };
+  const chip = (i: number) => <span className={`jchip s-${states[i]}`}>{STATE_WORD[states[i]]}</span>;
+  return (
+    <ol className={`journey ${props.variant}`}>
+      <li className={`jstep s-${states[0]}`}>
+        <div className="jhead">
+          <span className="jnum">1</span>
+          <h3>Fund Yojimbo’s bot wallet</h3>
+          {chip(0)}
+        </div>
+        <p className="jtext">
+          Yojimbo acts only through its own wallet: DeepBook Margin keeps a position’s caps inside its MarginManager and checks the sender, so they
+          can’t be handed to your wallet. From your own wallet, send only the SUI (for gas) and USDC you allow it to risk.
+        </p>
+        {wallet ? (
+          <>
+            <div className="addr">
+              <code>{wallet}</code>
+              <button className="btn ghost small" onClick={copy}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <dl className="jbal">
+              <div>
+                <dt>SUI</dt>
+                <dd className="num">{status?.balanceMist != null ? (Number(status.balanceMist) / 1e9).toFixed(3) : '—'}</dd>
+              </div>
+              <div>
+                <dt>USDC</dt>
+                <dd className="num">{status?.usdcBalance != null ? (Number(status.usdcBalance) / 1e6).toFixed(2) : '—'}</dd>
+              </div>
+            </dl>
+          </>
+        ) : (
+          <p className="jsetup">
+            Setup required: <code>YOJIMBO_BOT_KEY</code>
+            <span>Create a fresh Sui key for Yojimbo alone, never your main wallet, and set it on the server.</span>
+          </p>
+        )}
+      </li>
+
+      <li className={`jstep s-${states[1]}`}>
+        <div className="jhead">
+          <span className="jnum">2</span>
+          <h3>Open your margin position</h3>
+          {chip(1)}
+        </div>
+        <p className="jtext">
+          Yojimbo {hasManager ? 'uses its MarginManager' : 'creates a MarginManager'}, deposits your USDC, borrows USDC against it and buys SUI with
+          both: a long SUI position in the SUI/USDC pool.
+        </p>
+        {states[1] === 'done' ? (
+          <p className="jdone">Open: ratio {Number(position.state.riskRatio).toFixed(3)} on {short(position.managerId)}.</p>
+        ) : (
+          <>
+            <div className="jform">
+              <label>
+                <span>Deposit</span>
+                <span className="field">
+                  <input inputMode="decimal" value={deposit} onChange={(e) => setDeposit(e.target.value)} aria-label="Deposit USDC" />
+                  <em>USDC</em>
+                </span>
+              </label>
+              <label>
+                <span>Borrow</span>
+                <span className="field">
+                  <input inputMode="decimal" value={borrow} onChange={(e) => setBorrow(e.target.value)} aria-label="Borrow USDC" />
+                  <em>USDC</em>
+                </span>
+              </label>
+            </div>
+            <dl className="preview">
+              <div>
+                <dt>Leverage</dt>
+                <dd className="num">{leverage ? `${leverage.toFixed(2)}×` : '—'}</dd>
+              </div>
+              <div>
+                <dt>Starting ratio</dt>
+                <dd className="num">{ratio ? ratio.toFixed(2) : '—'}</dd>
+              </div>
+              <div>
+                <dt>Liquidation at</dt>
+                <dd className="num">{liq != null ? liq.toFixed(2) : '—'}</dd>
+              </div>
+            </dl>
+            <p className="jfine">Ratio = (deposit + borrow) ÷ borrow, before trading fees and slippage. 90% of the USDC buys SUI at market.</p>
+            {problem && <p className="jwarn">{problem}</p>}
+            <button className="btn primary" onClick={open} disabled={!wallet || !!problem || run?.busy}>
+              {!wallet ? 'Setup required: YOJIMBO_BOT_KEY' : run?.busy ? 'Building…' : hasManager ? 'Open the position' : 'Create manager and open'}
+            </button>
+            {run && run.lines.length > 0 && (
+              <ul className="jrun" role="status">
+                {run.lines.map((l, i) => (
+                  <li key={i} className={l.ok ? 'ok' : 'no'}>
+                    <b>{l.label}</b> {l.text}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        )}
+      </li>
+
+      <li className={`jstep s-${states[2]}`}>
+        <div className="jhead">
+          <span className="jnum">3</span>
+          <h3>Tell it your rules</h3>
+          {chip(2)}
+        </div>
+        <p className="jtext">Say when you sleep or fly and what it may do. Each one is kept on Walrus Memory and quoted when Yojimbo acts.</p>
+        {props.memorySetup && (
+          <p className="jsetup">
+            Setup required: <code>MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID</code>
+          </p>
+        )}
+        <div className="jchips">
+          {RULE_CHIPS.map((c) => (
+            <button key={c} className="chip" onClick={() => props.onRules(c)} disabled={props.busy}>
+              {c}
+            </button>
+          ))}
+        </div>
+        <button className="btn ghost" onClick={() => props.onRules()}>
+          Write your own in chat
+        </button>
+      </li>
+
+      <li className={`jstep s-${states[3]}`}>
+        <div className="jhead">
+          <span className="jnum">4</span>
+          <h3>It keeps watch</h3>
+          {chip(3)}
+        </div>
+        <p className="jtext">
+          Every 15 s it reads the position. When a rule fires it adds USDC collateral, trims with a reduce-only order or repays debt, never above{' '}
+          {caps ? `${caps.perActionUsdc} USDC an action and ${caps.dailyUsdc} USDC a day` : 'your per-action and daily caps'}. While you’re awake it asks
+          first: Approve, Reduce or Ignore.
+        </p>
+        <p className="jfine">
+          Now: {status ? (status.mainnetWrites ? 'mainnet writes enabled' : 'dry-run only, nothing is sent') : 'connecting'} · alerts{' '}
+          {status?.telegram?.startsWith('Setup') ? 'in this page only (Telegram not set up)' : 'here and on Telegram'}.
+        </p>
+      </li>
+    </ol>
   );
 }
 
