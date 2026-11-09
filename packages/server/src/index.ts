@@ -2,18 +2,22 @@ import 'dotenv/config';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
+import { liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
 
 const port=Number(process.env.PORT ?? 8787);
-const dataFile=resolve(process.cwd(),'data/events.json');
-const managersFile=resolve(process.cwd(),'data/managers.json');
+// Fork runs keep their own event log (YOJIMBO_DATA_DIR) so fork digests never mix with mainnet history.
+const dataDir=resolve(process.cwd(),process.env.YOJIMBO_DATA_DIR??'data');
+const dataFile=resolve(dataDir,'events.json');
+const managersFile=resolve(dataDir,'managers.json');
+const fork=forkUrl();
+async function forkLabel(){if(!fork)return null;const s=await forkStatus(forkClient(fork));return {label:`${FORK_SOURCE} @ checkpoint ${s.forkedAtCheckpoint}`,forkedAtCheckpoint:s.forkedAtCheckpoint,checkpoint:s.checkpoint,clockMs:s.clockMs,writes:process.env.YOJIMBO_ALLOW_FORK_WRITES===FORK_WRITE_GATE};}
 let managersCache:{at:number;items:RecentManager[]}|null=null;
 try{const saved=JSON.parse(await readFile(managersFile,'utf8'));if(Array.isArray(saved.items))managersCache=saved;}catch{}
 async function recentManagers(){
  if(managersCache&&Date.now()-managersCache.at<300_000)return managersCache.items;
  const items=await discoverRecentManagers(12);
  managersCache={at:Date.now(),items};
- await mkdir(resolve(process.cwd(),'data'),{recursive:true});await writeFile(managersFile,JSON.stringify(managersCache,null,2));
+ await mkdir(dataDir,{recursive:true});await writeFile(managersFile,JSON.stringify(managersCache,null,2));
  return items;
 }
 async function recentWithRisk(){
@@ -38,29 +42,29 @@ function json(res:ServerResponse,status:number,data:unknown){res.writeHead(statu
 function emit(type:string,data:unknown){for(const res of listeners)res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);}
 async function body(req:IncomingMessage){let text='';for await(const chunk of req){text+=chunk;if(text.length>100_000)throw new Error('Request too large');}return JSON.parse(text||'{}');}
 function safeError(e:unknown){const message=String(e);return /API_KEY|BOT_KEY|ACCOUNT_ID|Setup required/.test(message)?message.replace(/([A-Za-z_]+)=\S+/g,'$1=[redacted]'):message.slice(0,400);}
-async function persist(){await mkdir(resolve(process.cwd(),'data'),{recursive:true});await writeFile(dataFile,JSON.stringify(events,null,2));}
+async function persist(){await mkdir(dataDir,{recursive:true});await writeFile(dataFile,JSON.stringify(events,null,2));}
 async function sendTelegram(message:string){const token=process.env.TELEGRAM_BOT_TOKEN,chatId=process.env.TELEGRAM_CHAT_ID;if(!token||!chatId)return;await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:chatId,text:message,disable_web_page_preview:true})});}
 async function notify(message:string){emit('notification',{message,at:new Date().toISOString()});try{await sendTelegram(message);}catch{emit('status',{telegram:'Telegram delivery failed'});}}
-async function recall(ownerAddress:string,ctx:Context){return memoryReady()?memoryFor(ownerAddress).recall(ctx):[];}
+async function recall(ownerAddress:string,ctx:Context){if(memoryReady())return memoryFor(ownerAddress).recall(ctx);return fork&&process.env.YOJIMBO_FORK_RULES?forkRuleHits(resolve(process.cwd(),'../..',process.env.YOJIMBO_FORK_RULES)):[];}
 async function snapshot(ownerAddress:string){const p=await position(ownerAddress);if(!p.state||!p.price||!p.managerId)throw new Error('Setup required: bot-owned MarginManager');return p;}
 async function context(ownerAddress:string){const p=await snapshot(ownerAddress);return {p,ctx:{at:new Date(),ratio:p.state!.riskRatio,movePercent:lastPrice ? (p.price!-lastPrice)/lastPrice*100 : 0,suiPrice:p.price!}};}
-function spentToday(){const day=new Date().toISOString().slice(0,10);return events.filter(e=>e.at.startsWith(day)&&e.outcome==='mainnet success').reduce((n,e)=>n+e.amountUsdc,0);}
+function spentToday(){const day=new Date().toISOString().slice(0,10);return events.filter(e=>e.at.startsWith(day)&&e.outcome===(fork?'fork success':'mainnet success')).reduce((n,e)=>n+e.amountUsdc,0);}
 async function assess(ownerAddress:string){const {p,ctx}=await context(ownerAddress);const hits=await recall(ownerAddress,ctx);const decision=decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5));return {p,ctx,hits,decision};}
-async function assessWatched(managerId:string){const p=await watchPosition(managerId);const ctx:Context={at:new Date(),ratio:p.state.riskRatio,movePercent:0,suiPrice:p.price};const hits=await recall(p.owner,ctx);const cushion=p.thresholds?.liquidation==null?null:liquidationCushion({baseAsset:Number(p.state.baseAsset),quoteAsset:Number(p.state.quoteAsset),baseDebt:Number(p.state.baseDebt),quoteDebt:Number(p.state.quoteDebt),price:Number(p.price),quotePrice:Number(p.quotePrice),riskRatio:Number(p.state.riskRatio)},Number(p.thresholds.liquidation));return {...p,liquidation:cushion?{suiPriceAtLiquidationUsd:Number(cushion.price.toFixed(4)),suiMoveToLiquidationPercent:Number((cushion.move*100).toFixed(2)),alreadyLiquidatable:cushion.atOrBelow}:'no SUI price move alone liquidates this position',decision:decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5)),decisionSource:memoryReady()?'Walrus Memory':'defaults: no remembered rules (Walrus Memory setup required)',context:{at:ctx.at.toISOString(),movePercent:ctx.movePercent},caps:{perActionUsdc:Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10),dailyUsdc:Number(process.env.YOJIMBO_DAILY_USDC??30)}};}
+async function assessWatched(managerId:string){const p=await watchPosition(managerId);const ctx:Context={at:new Date(),ratio:p.state.riskRatio,movePercent:0,suiPrice:p.price};const hits=await recall(p.owner,ctx);const cushion=p.thresholds?.liquidation==null?null:liquidationCushion({baseAsset:Number(p.state.baseAsset),quoteAsset:Number(p.state.quoteAsset),baseDebt:Number(p.state.baseDebt),quoteDebt:Number(p.state.quoteDebt),price:Number(p.price),quotePrice:Number(p.quotePrice),riskRatio:Number(p.state.riskRatio)},Number(p.thresholds.liquidation));return {...p,liquidation:cushion?{suiPriceAtLiquidationUsd:Number(cushion.price.toFixed(4)),suiMoveToLiquidationPercent:Number((cushion.move*100).toFixed(2)),alreadyLiquidatable:cushion.atOrBelow}:'no SUI price move alone liquidates this position',decision:decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5)),decisionSource:memoryReady()?'Walrus Memory':fork&&process.env.YOJIMBO_FORK_RULES?`local fork rules file ${process.env.YOJIMBO_FORK_RULES} (not Walrus Memory)`:'defaults: no remembered rules (Walrus Memory setup required)',context:{at:ctx.at.toISOString(),movePercent:ctx.movePercent},caps:{perActionUsdc:Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10),dailyUsdc:Number(process.env.YOJIMBO_DAILY_USDC??30)}};}
 async function remember(ownerAddress:string,memory:Memory){const blobId=await memoryFor(ownerAddress).remember(memory);emit('memory',{blobId,memory});return blobId;}
 async function act(ownerAddress:string,decision:Decision,ctx:Context,managerId:string,state:any,forceDryRun=false){
  if(decision.action==='ignore')return {outcome:'ignored',decision};
  const amount=Math.min(decision.amountUsdc,Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10));
- const env=forceDryRun?{...process.env,YOJIMBO_ALLOW_MAINNET:''}:process.env;
+ const env=forceDryRun?{...process.env,YOJIMBO_ALLOW_MAINNET:'',YOJIMBO_ALLOW_FORK_WRITES:''}:process.env;
  const result=await executeDefence(ownerAddress,managerId,decision.action,amount,{baseAsset:state.baseAsset,baseDebt:state.baseDebt,quoteAsset:state.quoteAsset,quoteDebt:state.quoteDebt,price:ctx.suiPrice},spentToday(),env);
  let afterRatio:null|number=null;
- if(result.mode==='mainnet'){try{afterRatio=(await snapshot(ownerAddress)).state!.riskRatio;}catch{}}
- const outcome=result.mode==='mainnet'&&result.status?.status==='success'?'mainnet success':`${result.mode} ${result.status?.status??'unknown'}`;
+ if(result.mode==='mainnet'||result.mode==='fork'){try{afterRatio=(await snapshot(ownerAddress)).state!.riskRatio;}catch{}}
+ const outcome=(result.mode==='mainnet'||result.mode==='fork')&&result.status?.status==='success'?`${result.mode} success`:`${result.mode} ${result.status?.status??'unknown'}`;
  const row:EventRow={id:memoryId(),at:ctx.at.toISOString(),beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,amountUsdc:amount,outcome,txDigest:result.txDigest,ruleIds:decision.ruleIds,recalledBlobIds:decision.recalledBlobIds};
  events.unshift(row);await persist();emit('event',row);
  const memory:Memory={version:'YOJIMBO_V1',kind:'event',id:row.id,createdAt:row.at,text:`${decision.action}: ${outcome}. ${decision.quote}`,beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,txDigest:result.txDigest,outcome,ruleIds:decision.ruleIds};
  try{row.memoryBlobId=await remember(ownerAddress,memory);await persist();}catch(e){row.memoryError=safeError(e);await persist();}
- const txLink=result.txDigest?` https://suiscan.xyz/mainnet/tx/${result.txDigest}`:'';
+ const txLink=!result.txDigest?'':result.mode==='fork'?` digest ${result.txDigest} (${FORK_SOURCE} @ checkpoint ${result.fork.forkedAtCheckpoint}, not on Suiscan)`:` https://suiscan.xyz/mainnet/tx/${result.txDigest}`;
  await notify(`Yojimbo ${outcome}: ${decision.action} ${amount} USDC at risk ratio ${ctx.ratio.toFixed(3)}. “${decision.quote}”${txLink}`);
  return {outcome,decision,event:row};
 }
@@ -166,11 +170,12 @@ async function telegramWorker(){
 const server=createServer(async(req,res)=>{try{
  const path=new URL(req.url||'/',`http://localhost:${port}`).pathname;
  const origin=req.headers.origin;
- if(origin && !['http://localhost:5173','http://127.0.0.1:5173','http://localhost:5185','http://127.0.0.1:5185'].includes(origin))return json(res,403,{error:'Origin not allowed'});
+ if(origin && !['http://localhost:5173','http://127.0.0.1:5173','http://localhost:5185','http://127.0.0.1:5185','http://localhost:5186','http://127.0.0.1:5186'].includes(origin))return json(res,403,{error:'Origin not allowed'});
  if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
  if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
  if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null,usdcBalance:string|null=null;if(address){try{const client=chain(address).client;const balances=await Promise.all([client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'}),client.core.getBalance({owner:address,coinType:'0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'})]);balance=balances[0].balance.balance;usdcBalance=balances[1].balance.balance;}catch{}}
-  return json(res,200,{rpc:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
+  const forkInfo=await forkLabel();
+  return json(res,200,{fork:forkInfo,rpc:forkInfo?forkInfo.label:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:!fork&&process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
  if(path==='/registry')return json(res,200,await registry(process.env.YOJIMBO_BOT_KEY?owner():'0x1'));
  if(path==='/managers/recent')return json(res,200,{managers:await recentWithRisk()});
  const watchMatch=/^\/watch\/(0x[0-9a-fA-F]{64})$/.exec(path);
@@ -183,7 +188,7 @@ const server=createServer(async(req,res)=>{try{
   if(watched.owner!==owner())return json(res,403,{error:'Yojimbo only acts on positions its own bot wallet owns'});
   if(watched.decision.action==='ignore')return json(res,200,{outcome:'No defence permitted by current rules',decision:watched.decision});
   const s=watched.state;
-  const result=await executeDefence(watched.owner,watched.managerId,watched.decision.action,Math.min(watched.decision.amountUsdc,watched.caps.perActionUsdc),{baseAsset:s.baseAsset,baseDebt:s.baseDebt,quoteAsset:s.quoteAsset,quoteDebt:s.quoteDebt,price:watched.price},spentToday(),{...process.env,YOJIMBO_ALLOW_MAINNET:''});
+  const result=await executeDefence(watched.owner,watched.managerId,watched.decision.action,Math.min(watched.decision.amountUsdc,watched.caps.perActionUsdc),{baseAsset:s.baseAsset,baseDebt:s.baseDebt,quoteAsset:s.quoteAsset,quoteDebt:s.quoteDebt,price:watched.price},spentToday(),{...process.env,YOJIMBO_ALLOW_MAINNET:'',YOJIMBO_ALLOW_FORK_WRITES:''});
   return json(res,200,result);
  }
  // Setup writes for the bot's own position. Both go through core's write gate: without
@@ -203,7 +208,7 @@ const server=createServer(async(req,res)=>{try{
    result=await openLong(address,p.managerId!,Number(data.depositUsdc),Number(data.borrowUsdc),p.price!);
   }
   const allowed=process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS';
-  const note=result.mode==='mainnet'?'Executed on mainnet':allowed?'Dry run did not succeed, nothing was sent':'Dry-run only: YOJIMBO_ALLOW_MAINNET is not set, nothing was sent';
+  const note=result.mode==='fork'?`Executed on ${FORK_SOURCE} @ checkpoint ${result.fork.forkedAtCheckpoint}, not mainnet`:result.mode==='mainnet'?'Executed on mainnet':allowed?'Dry run did not succeed, nothing was sent':'Dry-run only: YOJIMBO_ALLOW_MAINNET is not set, nothing was sent';
   return json(res,200,{...result,note});
  }
  if(path==='/position')return json(res,200,await position(owner()));

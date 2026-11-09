@@ -4,6 +4,7 @@ import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { parseEnv } from 'node:util';
 import { readFileSync } from 'node:fs';
 import type { Transaction } from '@mysten/sui/transactions';
+import { decodeMemory, type Hit } from './policy.js';
 
 /** Visible label for every read and write that goes to a local sui-fork of Sui mainnet. */
 export const FORK_SOURCE = 'LOCAL FORK of Sui mainnet' as const;
@@ -78,4 +79,14 @@ export function keyFromEnvFile(file: string, name: string) {
   const value = parseEnv(readFileSync(file, 'utf8'))[name];
   if (!value) throw new Error(`Setup required: ${name} in ${file}`);
   return Ed25519Keypair.fromSecretKey(value);
+}
+
+/**
+ * Fork demos have no Walrus Memory account, so rules and schedules come from a local JSON file of
+ * YOJIMBO_V1 memories. Their IDs are prefixed `local-file:` so no decision can pass them off as Walrus blobs.
+ */
+export function forkRuleHits(file: string): Hit[] {
+  const items: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!Array.isArray(items)) throw new Error(`${file} must be a JSON array of YOJIMBO_V1 memories`);
+  return items.map(item => { const memory = decodeMemory(JSON.stringify(item)); if (!memory) throw new Error(`${file} has an invalid YOJIMBO_V1 memory`); return { blobId: `local-file:${memory.id}`, memory }; });
 }

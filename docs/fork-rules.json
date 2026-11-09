@@ -1,0 +1,4 @@
+[
+  {"version":"YOJIMBO_V1","kind":"schedule","id":"fork-guard-all-day","createdAt":"2026-11-09T11:30:00.000Z","text":"Fork demo: guard alone all day.","recurrence":"daily","start":"00:00","end":"23:59","timezone":"Asia/Kolkata","mode":"guard-alone"},
+  {"version":"YOJIMBO_V1","kind":"rule","id":"fork-deposit-below-3.2","createdAt":"2026-11-09T11:30:00.000Z","text":"If the risk ratio is at or below 3.2, deposit up to 5 USDC of collateral.","action":"deposit","belowRatio":3.2,"alertRatio":3.2,"maxUsdc":5,"mode":"guard-alone"}
+]

@@ -8,3 +8,5 @@ data/
 
 *.tsbuildinfo
 art-src/
+data-fork/
+.fork/
