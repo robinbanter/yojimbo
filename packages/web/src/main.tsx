@@ -196,6 +196,23 @@ function App() {
   const alert = visibleDecision?.alertRatio ?? 1.5;
   const liquidation: number | undefined = visibleRegistry?.liquidation;
   const minBorrow: number | undefined = visibleRegistry?.minBorrow;
+  // SUI price at which the risk ratio hits the liquidation line, from the position's own on-chain balances and
+  // Pyth prices: (base*p + quote*q) / (quoteDebt*q + baseDebt*p) = L  =>  p = q*(L*quoteDebt - quote) / (base - L*baseDebt).
+  const cushion = (() => {
+    if (!state || liquidation == null) return null;
+    const p = Number(state.basePythPrice) / 10 ** Number(state.basePythDecimals);
+    const q = Number(state.quotePythPrice) / 10 ** Number(state.quotePythDecimals);
+    const base = Number(state.baseAsset), quote = Number(state.quoteAsset), bd = Number(state.baseDebt), qd = Number(state.quoteDebt);
+    if (![p, q, base, quote, bd, qd].every(Number.isFinite) || p <= 0) return null;
+    if (bd === 0 && qd === 0) return { kind: 'none' as const };
+    if (Number(ratio) <= liquidation) return { kind: 'at' as const };
+    const denom = base - liquidation * bd;
+    if (denom === 0) return { kind: 'none' as const };
+    const price = (q * (liquidation * qd - quote)) / denom;
+    if (price <= 0) return { kind: 'none' as const };
+    const move = price / p - 1;
+    return { kind: 'move' as const, price, move, tier: Math.abs(move) < 0.03 ? 'danger' : Math.abs(move) < 0.1 ? 'watch' : 'safe' };
+  })();
   const pos = (v: number | undefined) => (v == null ? 0 : Math.max(0, Math.min(100, ((v - 1) / 1.5) * 100)));
   const kept = memory.filter((h) => ['schedule', 'rule', 'override'].includes(h.memory.kind));
   const memorySetup = status?.memory?.startsWith('Setup required');
@@ -296,6 +313,21 @@ function App() {
                 <b className="num">{Number(ratio).toFixed(3)}</b>
                 <span>risk ratio (assets ÷ debt)</span>
               </div>
+              {cushion && (
+                <p className={`cushion cushion-${cushion.kind === 'move' ? cushion.tier : cushion.kind === 'at' ? 'danger' : 'safe'}`}>
+                  {cushion.kind === 'move' ? (
+                    <>
+                      <b>{cushion.tier === 'danger' ? 'Danger' : cushion.tier === 'watch' ? 'Watch' : 'Safe'}</b> SUI can{' '}
+                      {cushion.move < 0 ? 'fall' : 'rise'} <b className="num">{Math.abs(cushion.move * 100).toFixed(1)}%</b> (to{' '}
+                      <span className="num">${cushion.price.toFixed(4)}</span>) before this position is liquidated.
+                    </>
+                  ) : cushion.kind === 'at' ? (
+                    <><b>Liquidatable</b> The ratio is at or below the liquidation line now.</>
+                  ) : (
+                    <><b>Safe</b> No SUI price move alone can liquidate this position.</>
+                  )}
+                </p>
+              )}
               <div className="gauge" aria-label="Risk ratio against liquidation, minimum borrow and your alert line">
                 <div className="gauge-fill" style={{ width: `${pos(ratio)}%` }} />
                 <i className="line-liq" style={{ left: `${pos(liquidation)}%` }} />
@@ -325,6 +357,9 @@ function App() {
                   <p className="muted small">{watched.decisionSource}</p>
                   <p>{visibleDecision?.mode} · {visibleDecision?.action} · {visibleDecision?.amountUsdc} USDC</p>
                   <p>“{visibleDecision?.quote}”</p>
+                  {visibleDecision?.action === 'ignore' && /no remembered rules/i.test(String(watched?.decisionSource ?? '')) && (
+                    <p className="muted small">No rules yet, so Yojimbo only watches. Tell it in chat what to do, e.g. “below 1.15, add 10 USDC”.</p>
+                  )}
                   <button className="primary" onClick={dryRunDefence}>Dry-run the defence</button>
                   {dryRun&&<p className="notice">{dryRun}</p>}
                 </article>

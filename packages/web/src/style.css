@@ -233,6 +233,35 @@ input {
   font-size: 48px;
   font-weight: 500;
 }
+.cushion {
+  margin: 4px 0 14px;
+  padding: 10px 12px;
+  border-left: 4px solid var(--ink, #1b1b1b);
+  background: rgba(0, 0, 0, 0.035);
+  font-size: 15px;
+  line-height: 1.45;
+}
+.cushion b:first-child {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-right: 8px;
+}
+.cushion-danger {
+  border-color: var(--vermilion);
+  background: rgba(216, 67, 47, 0.08);
+}
+.cushion-danger b:first-child {
+  color: var(--vermilion);
+}
+.cushion-watch {
+  border-color: var(--gold);
+  background: rgba(183, 121, 31, 0.08);
+}
+.cushion-safe {
+  border-color: var(--safe);
+}
 .gauge {
   position: relative;
   height: 14px;
