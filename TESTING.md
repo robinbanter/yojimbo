@@ -14,3 +14,7 @@
 - Telegram delivery: **0**, optional token and chat ID absent.
 
 Public Sui fullnode JSON-RPC returned “Method not found” during the first live attempt; the explicit dev override now uses gRPC. This does not validate the Tatum gateway or funded-wallet transaction path.
+
+## Round-2 judging pass (Nov 9 2026)
+- `pnpm test`: **12 passed**, 0 failed. New: 3 `liquidationCushion` tests. One uses the balances and Pyth prices of mainnet MarginManager `0x7426…4593`, reproduces the chain's risk ratio to 1e-6, and checks that the solved SUI price puts the ratio exactly on the 1.1 line. The others cover a short position and the no-debt and already-liquidatable cases.
+- Chat, checked by hand against the dev server: `nvidia/nemotron-3-ultra-550b-a55b:free` called `watch_position` and answered "SUI would need to drop 1.84 percent" for that manager. The stream now closes after `done`, so a second question no longer hangs.
