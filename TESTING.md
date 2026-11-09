@@ -18,3 +18,9 @@ Public Sui fullnode JSON-RPC returned “Method not found” during the first li
 ## Round-2 judging pass (Nov 9 2026)
 - `pnpm test`: **12 passed**, 0 failed. New: 3 `liquidationCushion` tests. One uses the balances and Pyth prices of mainnet MarginManager `0x7426…4593`, reproduces the chain's risk ratio to 1e-6, and checks that the solved SUI price puts the ratio exactly on the 1.1 line. The others cover a short position and the no-debt and already-liquidatable cases.
 - Chat, checked by hand against the dev server: `nvidia/nemotron-3-ultra-550b-a55b:free` called `watch_position` and answered "SUI would need to drop 1.84 percent" for that manager. The stream now closes after `done`, so a second question no longer hangs.
+
+## Nov 9 2026, late: Tatum gRPC + fork
+- `pnpm test`: **14 passed**, 0 failed (adds the liquidation-cushion and fork-mode tests).
+- `pnpm test:live` through Tatum's gRPC gateway (13:08 UTC): margin registry plus live risk ratios for 5 positions read through Tatum. Event listing (recent managers) uses the public fullnode, because Tatum's gateway refuses `ListEvents`. The process-wide throttle keeps calls under Tatum's 3 requests/second.
+- LOCAL FORK lifecycle (fund → open → watcher defence → unwind): see docs/FORK.md.
+
