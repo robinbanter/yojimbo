@@ -18,7 +18,7 @@ An AI bodyguard for a leveraged SUI/USDC DeepBook Margin position while its owne
 | Walrus Memory on mainnet | **Ready, 0 memories so far.** Yojimbo's own delegate key authenticates to the mainnet relayer (details below). Rules, schedules and overrides are stored only through the chat agent's tools. **PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC** | A scheduled run after the reset; the event requires at least 10 memories |
 | Mainnet transactions through Tatum (create, open, defence, unwind) | **PENDING.** None sent yet. The mainnet bot wallet exists, `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f`, and is unfunded | Nick: hub funding (40 USDC + 2.5 SUI to `0xf5887bcf…1f11`), then the bot wallet is funded from the hub (see the grokbot `MAINNET-RUNBOOK.md`) |
 | Chat agent | Works on a free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`). It hits rate limits, and a second answer took about 80 s in testing. The shared free key hit its daily cap ("free-models-per-day") at 15:41 UTC on Nov 9 | The daily reset at 00:00 UTC; optional OpenRouter credit |
-| Telegram alerts | Not set up (optional) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| Telegram alerts | **Live** (Nov 9): the bot @Yojimbo_robot is connected to the owner's chat. Alerts go out before any defence, and a reply in Telegram is parsed into an override memory. Fork test alerts are labelled `[LOCAL FORK test · no real funds]` | – |
 | Public repo | **PENDING** | Nick makes the repo public |
 | Tatum account ID (form), published blog and post | **PENDING** | Nick |
 

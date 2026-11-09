@@ -57,7 +57,7 @@ All Sui reads and transactions go through **Tatum's Sui gRPC gateway** (`sui-mai
 - Tatum Sui gRPC gateway through `@grpc/grpc-js` and `@protobuf-ts/grpc-transport`.
 - Walrus Memory: `@mysten-incubation/memwal` 0.1.13.
 - Chat: OpenRouter tool calls; default free model `nvidia/nemotron-3-ultra-550b-a55b:free`.
-- Optional Telegram alerts and replies.
+- Telegram alerts and replies, live on @Yojimbo_robot: the owner hears first, and a reply becomes an override memory on Walrus.
 - Local fork: `sui-fork` from the official Sui release `mainnet-v1.83.1`.
 - Tests: `pnpm test`, 14 passing (node:test via tsx), plus `pnpm test:live` against mainnet.
 
