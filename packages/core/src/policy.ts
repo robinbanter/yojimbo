@@ -54,3 +54,22 @@ export function decide(hits: Hit[], context: Context, alertRatio = 1.5): Decisio
   const quote = source?.text ?? 'No recalled rule permits an action.';
   return { mode, action, amountUsdc: action === 'ignore' ? 0 : chosen?.maxUsdc ?? 10, reason: triggered ? (source ? `Recalled ${source.kind} ${source.id}` : 'No matching recalled rule') : 'No alert threshold crossed', quote, ruleIds: source ? (source.kind === 'override' ? [source.supersedes,source.id] : [source.id]) : [], recalledBlobIds: hits.map(h=>h.blobId), timeoutAction: chosen?.defaultOnTimeout ?? 'ignore', nextWindow, alertRatio: personalAlert };
 }
+
+/**
+ * SUI price at which a margin manager's risk ratio reaches the liquidation line, holding the USDC price fixed.
+ * Risk ratio = (base*p + quote*q) / (quoteDebt*q + baseDebt*p); solving for ratio = L gives
+ * p = q*(L*quoteDebt - quote) / (base - L*baseDebt). Returns null when no SUI move alone can liquidate it.
+ */
+export function liquidationCushion(
+  s: { baseAsset: number; quoteAsset: number; baseDebt: number; quoteDebt: number; price: number; quotePrice: number; riskRatio: number },
+  liquidation: number,
+): { price: number; move: number; atOrBelow: boolean } | null {
+  const vals = [s.baseAsset, s.quoteAsset, s.baseDebt, s.quoteDebt, s.price, s.quotePrice, liquidation];
+  if (!vals.every(Number.isFinite) || s.price <= 0) return null;
+  if (s.riskRatio <= liquidation) return { price: s.price, move: 0, atOrBelow: true };
+  const denom = s.baseAsset - liquidation * s.baseDebt;
+  if (denom === 0 || (s.baseDebt === 0 && s.quoteDebt === 0)) return null;
+  const price = (s.quotePrice * (liquidation * s.quoteDebt - s.quoteAsset)) / denom;
+  if (!(price > 0)) return null;
+  return { price, move: price / s.price - 1, atOrBelow: false };
+}
