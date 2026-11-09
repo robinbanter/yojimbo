@@ -271,15 +271,15 @@ function App() {
       <main className="grid">
         <section className="card guard" aria-labelledby="guard-title">
           <h2 id="guard-title">On guard</h2>
-          <div className="status" aria-label="Position source">
+          <div className="seg" role="tablist" aria-label="Position source">
             <button className={source==='bot'?'primary':''} onClick={()=>setSource('bot')}>Bot wallet</button>
             <button className={source==='watch'?'primary':''} onClick={()=>setSource('watch')}>Watch a position</button>
           </div>
           {source==='watch'&&<>
             <p className="pill">Recent real SUI/USDC managers · closest to liquidation first</p>
-            {managers.map(m=><button className="event" key={m.managerId} onClick={()=>{setWatched(null);setWatchId(m.managerId);setDryRun('');}}>{short(m.managerId)} · risk {m.riskRatio.toFixed(3)} · last {new Date(m.lastActivity).toLocaleString()}</button>)}
+            <div className="mgrs">{managers.map(m=><button className={`mgr ${watchId===m.managerId?'on':''}`} key={m.managerId} onClick={()=>{setWatched(null);setWatchId(m.managerId);setDryRun('');}}><span className="num">{short(m.managerId)}</span><span className={`risk ${m.riskRatio<=m.liquidationRatio?'bad':m.riskRatio<1.5?'warn':''}`}>{m.riskRatio.toFixed(3)}</span><span className="muted small">{new Date(m.lastActivity).toLocaleString()}</span></button>)}</div>
             {errors.managers&&<p className="error">{errors.managers}</p>}
-            <form onSubmit={e=>{e.preventDefault();setWatched(null);setWatchId(pastedId.trim());setDryRun('');}}>
+            <form className="watch-form" onSubmit={e=>{e.preventDefault();setWatched(null);setWatchId(pastedId.trim());setDryRun('');}}>
               <input value={pastedId} onChange={e=>setPastedId(e.target.value)} placeholder="Paste a MarginManager ID" aria-label="MarginManager ID" />
               <button className="primary">Watch</button>
             </form>
@@ -315,7 +315,7 @@ function App() {
                 MarginManager {short(visiblePosition.managerId)} ↗
               </a>
               {source==='watch'&&<>
-                <article className="event">
+                <article className="decision">
                   <b>What Yojimbo would do right now</b>
                   <p className="muted small">{watched.decisionSource}</p>
                   <p>{visibleDecision?.mode} · {visibleDecision?.action} · {visibleDecision?.amountUsdc} USDC</p>

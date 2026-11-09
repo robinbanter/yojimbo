@@ -517,3 +517,76 @@ button.primary {
     animation: none;
   }
 }
+
+/* watch mode */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+.seg button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  min-height: 40px;
+}
+.seg button.primary {
+  background: var(--ink);
+  color: var(--paper);
+}
+.mgrs {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+  max-height: 260px;
+  overflow: auto;
+}
+.mgr {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  text-align: left;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+}
+.mgr .muted {
+  grid-column: 1 / -1;
+}
+.mgr.on {
+  border-color: var(--vermilion);
+  box-shadow: inset 3px 0 0 var(--vermilion);
+}
+.risk {
+  font: 600 14px var(--mono);
+  color: var(--safe);
+}
+.risk.warn {
+  color: #9b7c35;
+}
+.risk.bad {
+  color: var(--vermilion);
+}
+.watch-form {
+  margin-bottom: 12px;
+}
+.decision {
+  margin: 16px 0;
+  padding: 16px;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--paper);
+  border-left: 6px solid var(--vermilion);
+}
+.decision p {
+  margin: 6px 0;
+}
+.decision .muted {
+  color: #b8b1a3;
+}
+.decision button.primary {
+  background: var(--vermilion);
+  border-color: var(--vermilion);
+}
