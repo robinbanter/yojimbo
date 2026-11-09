@@ -1,4 +1,5 @@
-import { SuiJsonRpcClient, JsonRpcHTTPTransport } from '@mysten/sui/jsonRpc';
+import { GrpcTransport } from '@protobuf-ts/grpc-transport';
+import { ChannelCredentials } from '@grpc/grpc-js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { deepbook, mainnetPackageIds, mainnetCoins, mainnetPools } from '@mysten/deepbook-v3';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
@@ -38,14 +39,15 @@ export function rpc(env = process.env) {
   if (fork) return {client:forkClient(fork), source:FORK_SOURCE, url:fork};
   const dev = Boolean(env.YOJIMBO_DEV_SUI_RPC);
   if (!dev && !env.TATUM_API_KEY) throw new Error('Setup required: TATUM_API_KEY');
-  const url = dev ? env.YOJIMBO_DEV_SUI_RPC! : 'https://sui-mainnet.gateway.tatum.io';
-  if (dev) return {client:new SuiGrpcClient({network:'mainnet',baseUrl:url}), source:'dev RPC (not Tatum)' as const, url};
-  return {client:new SuiJsonRpcClient({network:'mainnet',transport:new JsonRpcHTTPTransport({url,rpc:{headers:{'x-api-key':env.TATUM_API_KEY!}}})}), source:'Tatum' as const, url};
+  if (dev) { const url=env.YOJIMBO_DEV_SUI_RPC!; return {client:new SuiGrpcClient({network:'mainnet',baseUrl:url}), source:'dev RPC (not Tatum)' as const, url}; }
+  // Tatum's Sui JSON-RPC gateway returns 404; it serves native gRPC (not gRPC-web) with the key in metadata.
+  const host = 'sui-mainnet-grpc.gateway.tatum.io:443';
+  const transport = new GrpcTransport({host,channelCredentials:ChannelCredentials.createSsl(),meta:{'x-api-key':env.TATUM_API_KEY!}});
+  return {client:new SuiGrpcClient({network:'mainnet',transport}), source:'Tatum' as const, url:`grpc://${host}`};
 }
 export function chain(owner: string, managerId?: string, env = process.env) {
   const r = rpc(env);
   const options = {address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey:POOL}} : undefined};
-  if (r.source === 'dev RPC (not Tatum)' || r.source === FORK_SOURCE) return {...r,client:r.client.$extend(deepbook(options))};
   return {...r,client:r.client.$extend(deepbook(options))};
 }
 export async function registry(owner: string, env = process.env) {
@@ -104,6 +106,20 @@ export async function discoverRecentManagers(limit=8,env=process.env):Promise<Re
   }
   return [...seen.values()].sort((a,b)=>b.lastActivity.localeCompare(a.lastActivity)).slice(0,limit);
 }
+/** Mainnet path: simulate, then send only through Tatum with YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS. The dev RPC never sends. */
+async function mainnetWrite(owner:string,tx:Transaction,client:SuiGrpcClient,env=process.env){
+  const simulated=await client.core.simulateTransaction({transaction:tx,include:{effects:true}});
+  const status=simulated.FailedTransaction ? {status:'failure',error:simulated.FailedTransaction.status.error?.message ?? 'simulation failed'} : {status:'success'};
+  if (env.YOJIMBO_DEV_SUI_RPC) {
+    if (env.YOJIMBO_ALLOW_MAINNET === 'I_ACKNOWLEDGE_REAL_FUNDS') throw new Error('Remove YOJIMBO_DEV_SUI_RPC before mainnet writes');
+    return {mode:'dry-run' as const,status,txDigest:null};
+  }
+  if (status.status !== 'success' || env.YOJIMBO_ALLOW_MAINNET !== 'I_ACKNOWLEDGE_REAL_FUNDS') return {mode:'dry-run' as const,status,txDigest:null};
+  if (owner !== botKey(env).toSuiAddress()) throw new Error('Bot wallet does not own this manager');
+  const result=await client.core.signAndExecuteTransaction({signer:botKey(env),transaction:tx,include:{effects:true}});
+  const executed=result.$kind==='Transaction'?result.Transaction:result.FailedTransaction;
+  return {mode:'mainnet' as const,status:executed.effects.status.success?{status:'success'}:{status:'failure',error:executed.effects.status.error?.message ?? 'execution failed'},txDigest:executed.digest};
+}
 /** Local fork writes: simulate first, then send only with YOJIMBO_ALLOW_FORK_WRITES=LOCAL_FORK_ONLY. Never reaches mainnet. */
 async function forkWrite(owner:string,tx:Transaction,client:SuiGrpcClient,env=process.env){
   let status:{status:string;error?:string};
@@ -142,38 +158,13 @@ export async function executeDefence(owner:string,managerId:string,action:Defenc
   if (![cap,daily,amountUsdc,spentToday].every(v=>Number.isFinite(v)&&v>=0) || cap<=0 || daily<=0 || amountUsdc<=0 || amountUsdc>cap || spentToday+amountUsdc>daily) throw new Error('Defence exceeds per-action or daily USDC cap');
   if (action==='repay' && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
   const {tx,client}=await buildDefence(owner,managerId,action,amountUsdc,state,env);
-  if (forkUrl(env)) return forkWrite(owner,tx,client as SuiGrpcClient,env);
-  if (env.YOJIMBO_DEV_SUI_RPC) {
-    const simulated=await client.core.simulateTransaction({transaction:tx,include:{effects:true}});
-    const status = simulated.FailedTransaction ? {status:'failure',error:simulated.FailedTransaction.status.error?.message ?? 'simulation failed'} : {status:'success'};
-    if (env.YOJIMBO_ALLOW_MAINNET === 'I_ACKNOWLEDGE_REAL_FUNDS') throw new Error('Remove YOJIMBO_DEV_SUI_RPC before mainnet writes');
-    return {mode:'dry-run' as const,status,txDigest:null};
-  }
-  const jsonClient=client as SuiJsonRpcClient;
-  const bytes=await tx.build({client:jsonClient});
-  const dryRun=await jsonClient.dryRunTransactionBlock({transactionBlock:bytes});
-  const status=dryRun.effects.status;
-  if (status.status !== 'success' || env.YOJIMBO_ALLOW_MAINNET !== 'I_ACKNOWLEDGE_REAL_FUNDS') return {mode:'dry-run' as const,status,txDigest:null};
-  if (owner !== botKey(env).toSuiAddress()) throw new Error('Bot wallet does not own this manager');
-  const result=await jsonClient.signAndExecuteTransaction({signer:botKey(env),transaction:tx,options:{showEffects:true}});
-  return {mode:'mainnet' as const,status:result.effects?.status ?? null,txDigest:result.digest};
+  if (forkUrl(env)) return forkWrite(owner,tx,client,env);
+  return mainnetWrite(owner,tx,client,env);
 }
 export async function setupTransaction(owner:string,tx:Transaction,env=process.env){
   const c=chain(owner,undefined,env);
-  if(forkUrl(env))return forkWrite(owner,tx,c.client as SuiGrpcClient,env);
-  if(env.YOJIMBO_DEV_SUI_RPC){
-    const simulation=await c.client.core.simulateTransaction({transaction:tx,include:{effects:true}});
-    const status=simulation.FailedTransaction ? {status:'failure',error:simulation.FailedTransaction.status.error?.message??'simulation failed'} : {status:'success'};
-    if(env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS')throw new Error('Remove YOJIMBO_DEV_SUI_RPC before mainnet writes');
-    return {mode:'dry-run' as const,status,txDigest:null};
-  }
-  const jsonClient=c.client as SuiJsonRpcClient;
-  const bytes=await tx.build({client:jsonClient});
-  const dry=await jsonClient.dryRunTransactionBlock({transactionBlock:bytes});
-  if(dry.effects.status.status!=='success'||env.YOJIMBO_ALLOW_MAINNET!=='I_ACKNOWLEDGE_REAL_FUNDS')return {mode:'dry-run' as const,status:dry.effects.status,txDigest:null};
-  if(owner!==botKey(env).toSuiAddress())throw new Error('Bot wallet mismatch');
-  const result=await jsonClient.signAndExecuteTransaction({signer:botKey(env),transaction:tx,options:{showEffects:true}});
-  return {mode:'mainnet' as const,status:result.effects?.status??null,txDigest:result.digest};
+  if(forkUrl(env))return forkWrite(owner,tx,c.client,env);
+  return mainnetWrite(owner,tx,c.client,env);
 }
 export async function createMarginManager(owner:string,env=process.env){
   const c=chain(owner,undefined,env);const tx=new Transaction();tx.setSender(owner);tx.add(c.client.deepbook.marginManager.newMarginManager(POOL));
