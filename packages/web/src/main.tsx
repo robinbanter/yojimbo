@@ -61,23 +61,37 @@ const STARTERS = [
   'If the ratio drops under 1.3, cut half',
 ];
 
-const BAND = [
+const STORY = [
   {
-    art: '/art/yojimbo-feature-2.webp',
-    title: 'Learns your hours',
-    text: 'Say when you sleep, fly or work. Each schedule is kept as a memory on Walrus and decides whether Yojimbo asks first or guards alone.',
+    art: '/art/yojimbo-night-watch.webp',
+    step: '01 · Sleep',
+    title: 'While you sleep',
+    text: 'Your sleeping hours are a schedule kept on Walrus. Inside them Yojimbo guards alone: it adds USDC collateral, trims with a reduce-only order or repays debt, from its own bot wallet and never above the per-action cap.',
   },
   {
-    art: '/art/yojimbo-feature-3.webp',
-    title: 'Keeps your orders',
-    text: 'Rules and every correction you make are recalled before each decision, and each defence quotes the rule it followed.',
+    art: '/art/yojimbo-plane-night.webp',
+    step: '02 · Fly',
+    title: 'While you fly',
+    text: 'Say “Flying Tuesday 10:00 to 16:00 IST” and that window joins the schedule. Your rules and every correction are recalled before each move.',
   },
   {
-    art: '/art/yojimbo-feature-1.webp',
-    title: 'Steps in within caps',
-    text: 'Adds USDC collateral, trims with a reduce-only order or repays debt, from its own bot wallet only and never above the per-action cap.',
+    art: '/art/yojimbo-dawn.webp',
+    step: '03 · Wake',
+    title: 'When you wake',
+    text: 'Awake, it asks first: Approve, Reduce or Ignore, falling back to your rule’s default after 60 seconds. The night log shows each defence and the rule it quoted.',
   },
 ];
+const LANTERN: Record<string, string> = {
+  safe: '/art/yojimbo-lantern-safe.webp',
+  watch: '/art/yojimbo-lantern-watch.webp',
+  danger: '/art/yojimbo-lantern-danger.webp',
+};
+const POSE: Record<string, { src: string; alt: string }> = {
+  seated: { src: '/art/yojimbo-guardian-seated.webp', alt: 'The guardian sits at rest' },
+  alert: { src: '/art/yojimbo-guardian-alert.webp', alt: 'The guardian rises, hand on his sword' },
+  bow: { src: '/art/yojimbo-guardian-bow.webp', alt: 'The guardian bows' },
+};
+const AVATAR = '/art/yojimbo-chat-avatar.webp';
 
 const ago = (iso: string) => {
   const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -116,6 +130,7 @@ function App() {
   const [watched, setWatched] = useState<any>(null);
   const [dryRun, setDryRun] = useState<{ ok: boolean; text: string } | null>(null);
   const [dryBusy, setDryBusy] = useState(false);
+  const [approved, setApproved] = useState(false);
   const chatEnd = useRef<HTMLDivElement>(null);
   // The looping hero film is optional: it is skipped under reduced motion and dropped if the file is missing,
   // leaving the still poster image underneath.
@@ -250,6 +265,7 @@ function App() {
       const v = await r.json();
       if (!r.ok) throw new Error(v.error);
       setApproval(null);
+      setApproved(choice === 'approve');
       void refresh();
     } catch (e) {
       setNotifications((v) => [String((e as Error).message ?? e), ...v]);
@@ -305,6 +321,13 @@ function App() {
     setWatchId(id);
     setDryRun(null);
   };
+  // The guardian follows the decision: at rest when Yojimbo would ignore, on alert when a defence is pending or the
+  // guard rail refused it, bowing after you approved one.
+  const pose = approved
+    ? 'bow'
+    : approval || (dryRun && !dryRun.ok) || (visibleDecision && visibleDecision.action !== 'ignore')
+      ? 'alert'
+      : 'seated';
   const steps = useMemo(() => buildSteps([...trace].reverse()), [trace]);
 
   return (
@@ -355,12 +378,16 @@ function App() {
           </div>
         </div>
         <figure className="hero-art">
-          <img
-            src="/art/yojimbo-hero.webp"
-            alt="A ronin keeps night watch on a rainy veranda beside a sleeping figure, a red lantern glowing"
-            width={1536}
-            height={1024}
-          />
+          <div className="hero-scene">
+            <img
+              src="/art/yojimbo-hero.webp"
+              alt="A ronin keeps night watch on a rainy veranda beside a sleeping figure, a red lantern glowing"
+              width={1536}
+              height={1024}
+            />
+            <span className="hero-glow" aria-hidden="true" />
+          </div>
+          <span className="hero-rain" aria-hidden="true" />
           {heroVideo && (
             <video
               autoPlay
@@ -387,6 +414,7 @@ function App() {
                     <br />
                     <span className="mono">{short(visiblePosition.managerId)}</span>
                   </span>
+                  {tier && <img className={`lantern hw-lantern l-${tier}`} src={LANTERN[tier]} alt="" width={64} height={64} />}
                 </div>
                 {cushion?.kind === 'move' && (
                   <p className={`hw-cushion t-${tier}`}>
@@ -432,7 +460,8 @@ function App() {
 
       {approval && (
         <section className="approval" role="alert">
-          <div>
+          <img className="approval-guard" src={POSE.alert.src} alt="" width={64} height={64} />
+          <div className="approval-text">
             <b>Yojimbo is asking before it acts</b>
             <p>
               {approval.decision.action}: “{approval.decision.quote}”
@@ -512,7 +541,10 @@ function App() {
             </>
           ) : (
             <div className="bot-box">
-              <p className="caption">Yojimbo only ever acts on the position its own bot wallet owns, within your caps.</p>
+              <div className="bot-intro">
+                <img src="/art/yojimbo-seal-wallet.webp" alt="" width={72} height={72} />
+                <p className="caption">Yojimbo only ever acts on the position its own bot wallet owns, within your caps.</p>
+              </div>
               <dl className="bot-facts">
                 <div>
                   <dt>Wallet</dt>
@@ -556,8 +588,9 @@ function App() {
               </div>
               {cushion && (
                 <p className={`cushion cushion-${tier}`}>
+                  <img className={`lantern l-${tier}`} src={LANTERN[tier ?? 'safe']} alt="" width={64} height={64} />
                   <span className="cushion-chip">{tierWord}</span>
-                  <span>
+                  <span className="cushion-text">
                     {cushion.kind === 'move' ? (
                       <>
                         SUI can {cushion.move < 0 ? 'fall' : 'rise'} <b className="num">{Math.abs(cushion.move * 100).toFixed(1)}%</b> (to{' '}
@@ -608,7 +641,7 @@ function App() {
               {source === 'watch' && (
                 <article className="decision" aria-labelledby="decision-title">
                   <div className="decision-head">
-                    <img src="/art/yojimbo-object-3.webp" alt="" width={44} height={44} />
+                    <img className={`guardian g-${pose}`} key={pose} src={POSE[pose].src} alt={POSE[pose].alt} width={92} height={92} />
                     <div>
                       <h3 id="decision-title">What Yojimbo would do right now</h3>
                       <p className="muted small">{watched.decisionSource}</p>
@@ -680,7 +713,7 @@ function App() {
 
         <section className="panel chat-card" id="chat" aria-labelledby="chat-title">
           <div className="chat-head">
-            <img src="/art/yojimbo-mark.webp" alt="" width={40} height={40} />
+            <img src={AVATAR} alt="" width={44} height={44} />
             <div>
               <h2 id="chat-title">Talk to your bodyguard</h2>
               <p className="muted small">
@@ -693,15 +726,16 @@ function App() {
             {messages.length ? (
               messages.map((m, i) => (
                 <div className={`message ${m.role}`} key={i}>
-                  {m.role !== 'you' && <img className="avatar" src="/art/yojimbo-mark.webp" alt="" width={28} height={28} />}
+                  {m.role !== 'you' && <img className="avatar" src={AVATAR} alt="" width={30} height={30} />}
                   <div className="bubble">
                     <b>{m.role === 'yojimbo' ? 'Yojimbo' : m.role === 'you' ? 'You' : 'Error'}</b>
-                    <p>{m.text}</p>
+                    <p>{m.role === 'error' ? m.text.replace(/^Error:\s*/, '') : m.text}</p>
                   </div>
                 </div>
               ))
             ) : (
               <div className="starters">
+                <img className="moon" src="/art/yojimbo-moon-phases.webp" alt="" width={1536} height={512} />
                 <p className="greet">Tell me your life and your rules. I’ll remember them and keep watch.</p>
                 {STARTERS.map((s) => (
                   <button key={s} className="starter" onClick={() => send(s)} disabled={busy}>
@@ -712,7 +746,7 @@ function App() {
             )}
             {busy && (
               <div className="message thinking" aria-label="Yojimbo is thinking">
-                <img className="avatar" src="/art/yojimbo-mark.webp" alt="" width={28} height={28} />
+                <img className="avatar" src={AVATAR} alt="" width={30} height={30} />
                 <div className="bubble">
                   <span className="typing">
                     <i />
@@ -739,6 +773,7 @@ function App() {
           </form>
           <div className="tools" aria-label="Tool calls">
             <div className="tools-head">
+              <img src="/art/yojimbo-tool-brush.webp" alt="" width={30} height={30} />
               <h3>Tool calls</h3>
               <span className="count">{steps.length}</span>
             </div>
@@ -798,7 +833,10 @@ function App() {
       <div className="lower">
         <section className="panel memory-card" id="memory" aria-labelledby="memory-title">
           <div className="panel-head">
-            <h2 id="memory-title">What it remembers</h2>
+            <h2 id="memory-title">
+              <img src="/art/yojimbo-scroll-rules.webp" alt="" width={40} height={40} />
+              What it remembers
+            </h2>
             <span className="tag">Walrus mainnet</span>
           </div>
           {errors.memory && <p className="error">{errors.memory}</p>}
@@ -832,7 +870,7 @@ function App() {
             </div>
           ) : (
             <Empty
-              art="/art/yojimbo-object-2.webp"
+              art="/art/yojimbo-empty-memory.webp"
               title={memorySetup ? 'Setup required: Walrus Memory' : 'No rules yet'}
               text="Your schedule, rules and corrections are stored on Walrus. Every defence quotes the one it followed."
               detail={memorySetup ? 'MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID' : undefined}
@@ -887,7 +925,7 @@ function App() {
             </div>
           ) : (
             <Empty
-              art="/art/yojimbo-empty-1.webp"
+              art="/art/yojimbo-empty-log.webp"
               title="A quiet night"
               text="Every defence lands here with its before and after ratio, the rule it followed and the transaction."
             />
@@ -895,18 +933,22 @@ function App() {
         </section>
       </div>
 
+      <img className="divider" src="/art/yojimbo-divider.webp" alt="" width={1536} height={256} />
       <section className="watch-band" aria-labelledby="band-title">
         <div className="band-head">
           <p className="eyebrow plain">How it keeps watch</p>
           <h2 id="band-title">
-            Three things a good bodyguard does, <em>without being told twice.</em>
+            Sleep, fly, wake. <em>It keeps the same orders.</em>
           </h2>
         </div>
         <div className="band-grid">
-          {BAND.map((b) => (
+          {STORY.map((b) => (
             <article className="band-card" key={b.title}>
-              <img src={b.art} alt="" width={1024} height={1024} />
+              <div className="band-art">
+                <img src={b.art} alt="" width={1536} height={1024} />
+              </div>
               <div>
+                <span className="band-step">{b.step}</span>
                 <h3>{b.title}</h3>
                 <p>{b.text}</p>
               </div>
