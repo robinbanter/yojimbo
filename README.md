@@ -15,11 +15,12 @@ An AI bodyguard for a leveraged SUI/USDC DeepBook Margin position while its owne
 | Watch mode, liquidation cushion, rule engine, dry-run refusal for positions Yojimbo does not own | Live, read-only | – |
 | Full lifecycle: fund, create manager, open, watcher defence, unwind | Proven on a **LOCAL FORK of Sui mainnet** only (real Move execution, fork-only keys, no real funds) | – |
 | Rules on the fork | From the local file `docs/fork-rules.json`, labelled `local-file:` in the app. **Not Walrus Memory** | – |
-| Walrus Memory writes and recalls on mainnet | **PENDING.** 0 memories on mainnet; the event requires at least 10 | Nick: Walrus Memory account ID (`MEMWAL_MAINNET_ACCOUNT_ID`) |
-| Mainnet transactions through Tatum (create, open, defence, unwind) | **PENDING.** None sent yet | Nick: hub funding (40 USDC + 2.5 SUI), then `YOJIMBO_BOT_KEY` funded from the hub (see the grokbot `MAINNET-RUNBOOK.md`) |
-| Chat agent | Works on a free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`). It hits rate limits, and a second answer took about 80 s in testing | Optional: OpenRouter credit |
+| Walrus Memory on mainnet | **Ready, 0 memories so far.** Yojimbo's own delegate key authenticates to the mainnet relayer (details below). Rules, schedules and overrides are stored only through the chat agent's tools. **PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC** | A scheduled run after the reset; the event requires at least 10 memories |
+| Mainnet transactions through Tatum (create, open, defence, unwind) | **PENDING.** None sent yet. The mainnet bot wallet exists, `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f`, and is unfunded | Nick: hub funding (40 USDC + 2.5 SUI to `0xf5887bcf…1f11`), then the bot wallet is funded from the hub (see the grokbot `MAINNET-RUNBOOK.md`) |
+| Chat agent | Works on a free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`). It hits rate limits, and a second answer took about 80 s in testing. The shared free key hit its daily cap ("free-models-per-day") at 15:41 UTC on Nov 9 | The daily reset at 00:00 UTC; optional OpenRouter credit |
 | Telegram alerts | Not set up (optional) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
 | Public repo | **PENDING** | Nick makes the repo public |
+| Tatum account ID (form), published blog and post | **PENDING** | Nick |
 
 ## Try it
 
@@ -70,6 +71,18 @@ Runs 1 and 2 (open and defence on separate forks) are in [docs/FORK.md](docs/FOR
 | Round-2 watch pass ([TESTING.md](TESTING.md)) | public fullnode, labelled **dev RPC (not Tatum)** | 12 managers in 3.35 s; manager `0x7426…4593` at ratio 1.131, about 1.8% above liquidation |
 
 No mainnet transaction digest exists yet. Mainnet Suiscan links will be added here after the funded run.
+
+### Walrus Memory on mainnet
+
+| What | Observed |
+|---|---|
+| Account ID (public, on chain) | `0xd2ca3cbe1bd663a5fe7df7c14590451bbc712255cfee59966b0b8413cdaa335a`, owner `0x0cff6ac3b0396c3b449de58472dcf9cfd55f0bb2aefaca92c43315de128c7e93` |
+| How it was found | On chain, not from a dashboard. The relayer's `GET https://relayer.memory.walrus.xyz/config` gives package `0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5`. Its `account::DelegateKeyAdded` events list Yojimbo's delegate key (label "Web App") under that account |
+| Delegate key | Yojimbo signs with its own delegate key. `POST /api/stats` on the mainnet relayer returned the owner above |
+| Memories stored | **0 so far.** PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC |
+| Write wait | Mainnet blobs took over 60 s to certify, so each write now waits up to 300 s (`a63b4b2`) |
+
+The memory count here will be the real count from the relayer, not an estimate.
 
 ## Films (not public yet)
 

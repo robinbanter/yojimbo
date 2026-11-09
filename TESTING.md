@@ -10,7 +10,7 @@
 - Manager state read: **0**, blocked because `YOJIMBO_BOT_KEY` was absent.
 - Deposit dry-run: **0**, blocked because no funded bot-owned MarginManager was available. No successful defence is claimed.
 - Tatum transport read: **0**, blocked because `TATUM_API_KEY` was absent.
-- Walrus write/recall: **0**, blocked because delegate credentials were absent.
+- Walrus write/recall: **0** at the time, because delegate credentials were absent. Superseded by the Walrus readiness check below.
 - Telegram delivery: **0**, optional token and chat ID absent.
 
 Public Sui fullnode JSON-RPC returned “Method not found” during the first live attempt; the explicit dev override now uses gRPC. This does not validate the Tatum gateway or funded-wallet transaction path.
@@ -24,3 +24,8 @@ Public Sui fullnode JSON-RPC returned “Method not found” during the first li
 - `pnpm test:live` through Tatum's gRPC gateway (13:08 UTC): margin registry plus live risk ratios for 5 positions read through Tatum. Event listing (recent managers) uses the public fullnode, because Tatum's gateway refuses `ListEvents`. The process-wide throttle keeps calls under Tatum's 3 requests/second.
 - LOCAL FORK lifecycle (fund → open → watcher defence → unwind): see docs/FORK.md.
 
+## Nov 9 2026, evening: Walrus Memory readiness
+- Yojimbo's delegate key (label "Web App") is listed in the `account::DelegateKeyAdded` events of package `0xe7c16fbe…d7f5` (from the relayer's `GET /config`) under account `0xd2ca3cbe…335a`.
+- `POST /api/stats` on the mainnet relayer returned owner `0x0cff6ac3…7e93`, so the key authenticates.
+- Memories written: **0**. Rules are stored only through the chat agent's tools, and the shared OpenRouter free key hit "free-models-per-day" at 15:41 UTC. PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC.
+- Mainnet blobs took over 60 s to certify, so writes now wait up to 300 s (`a63b4b2`).

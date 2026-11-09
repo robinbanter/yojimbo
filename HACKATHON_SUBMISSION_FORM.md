@@ -27,7 +27,8 @@ The chat agent's tool calls stream into the UI as it works. The language model w
 **Status, stated plainly:**
 - Live on Sui mainnet today: read-only watch mode, with reads through Tatum's gRPC gateway.
 - Proven end to end on a **local fork of Sui mainnet**, with real Move execution and no real funds: fund, open, defence (risk ratio 2.999 → 3.999) and unwind (19.82 of 20 USDC returned). On the fork, rules come from a local file, not Walrus Memory.
-- **PENDING:** Walrus Memory on mainnet (0 memories so far, waiting for the account ID), and the first mainnet transaction (waiting for hub funding).
+- Walrus Memory on mainnet is ready: Yojimbo's own delegate key authenticates to the mainnet relayer. 0 memories so far. **PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC.**
+- **PENDING:** the first mainnet transaction. The bot wallet `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f` exists and is unfunded, waiting for hub funding.
 
 ## How it uses Walrus Memory
 
@@ -40,14 +41,14 @@ Each bot wallet gets its own namespace, `yojimbo-v1:<bot address>`, through the 
 
 Before every decision, the watcher recalls schedules, rules and overrides by semantic query. Each decision shows the blob IDs it recalled. If memory is unavailable, or no recalled rule allows an action, Yojimbo does not defend. It fails closed and says **Setup required: Walrus Memory**.
 
-**PENDING:** 0 memories are stored on mainnet so far. The event requires at least 10. This is blocked on the Walrus Memory account ID (`MEMWAL_MAINNET_ACCOUNT_ID`). The planned mainnet run writes the rule, the schedule, the defence event, an owner override and the daily summary through the app. We will report the real count from the relayer, not an estimate.
+**Status:** Walrus Memory is ready on mainnet, with 0 memories so far. The event requires at least 10. Rules, schedules and overrides are stored only through the chat agent's tools. The shared OpenRouter free key hit its daily cap ("free-models-per-day") at 15:41 UTC on Nov 9, so the owner's rules go in after the reset. **PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC.** The planned mainnet run then writes the rule, the schedule, the defence event, an owner override and the daily summary through the app. Mainnet blobs took over 60 s to certify, so each write waits up to 300 s. We will report the real count from the relayer, not an estimate.
 
 ## How it uses Tatum
 
 All Sui reads and transactions go through **Tatum's Sui gRPC gateway** (`sui-mainnet-grpc.gateway.tatum.io:443`, TLS, `x-api-key` metadata). Yojimbo builds a `SuiGrpcClient` from `@mysten/sui` over `@grpc/grpc-js`, with a process-wide limiter for Tatum's free plan (3 requests a second, with backoff on HTTP 429).
 
 - **Reads (live):** the DeepBook margin registry and pool thresholds, MarginManager balances and debt, and Pyth SUI and USDC price objects. On Nov 9 2026, `pnpm test:live` reported `source: "Tatum"`, margin package v8, liquidation ratio 1.1, and live risk ratios for 5 recent SUI/USDC managers. One exception: Tatum's gateway refuses `LedgerService/ListEvents`, so the recent-manager event list uses the public Sui fullnode. Every other read goes through Tatum.
-- **Transactions (PENDING on mainnet):** creating the margin manager, opening the position, every defence and the unwind are simulated first, then signed by the bot wallet and sent through Tatum. A send happens only with `YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS`. No mainnet transaction has been sent yet; it needs Nick's hub funding.
+- **Transactions (PENDING on mainnet):** creating the margin manager, opening the position, every defence and the unwind are simulated first, then signed by the bot wallet and sent through Tatum. A send happens only with `YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS`. No mainnet transaction has been sent yet; it needs Nick's hub funding (40 USDC + 2.5 SUI to `0xf5887bcfaa178fbcc29f560afce15734e13989955100f9a6b6154c34a79c1f11`).
 
 ## Tech stack
 
@@ -68,7 +69,7 @@ https://github.com/nickthelegend/yojimbo (**Nick fills / confirms**; the repo mu
 
 - Fork film, `yojimbo-fork-film-v1.mp4` (1:52): fund, open and defence on the local fork, with a fork badge in every shot. Link: **PENDING upload (Nick fills)**.
 - Watch-mode film, `yojimbo-film-v3.mp4` (1:41): mainnet watch mode, chat agent and phone layout. Its reads use the public Sui node and are labelled on screen. Link: **PENDING upload (Nick fills)**.
-- A mainnet film with Walrus Memory and a funded defence is planned after the keys and funding arrive.
+- A mainnet film with Walrus Memory and a funded defence is planned after the first rules are written and the hub is funded.
 
 ## Tatum account ID
 
@@ -76,7 +77,9 @@ https://github.com/nickthelegend/yojimbo (**Nick fills / confirms**; the repo mu
 
 ## MEMWAL_AGENT_ID
 
-`<MEMWAL_AGENT_ID>`: **Nick fills** (pending the Walrus Memory account setup).
+`0xd2ca3cbe1bd663a5fe7df7c14590451bbc712255cfee59966b0b8413cdaa335a`
+
+This is the Walrus Memory account ID. The code reads it as `MEMWAL_MAINNET_ACCOUNT_ID`. It is public and on chain: the relayer's `GET /config` gives package `0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5`, and its `account::DelegateKeyAdded` events list Yojimbo's delegate key (label "Web App") under this account. The owner is `0x0cff6ac3b0396c3b449de58472dcf9cfd55f0bb2aefaca92c43315de128c7e93`. One account serves Yojimbo, Eidolon and Nakama, and each app signs with its own delegate key.
 
 ## Blog post
 

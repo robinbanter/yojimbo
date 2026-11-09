@@ -33,18 +33,18 @@ Each bot wallet gets its own Walrus Memory namespace, which holds four kinds of 
 
 Before each decision, the watcher recalls schedules, rules and overrides by semantic query. The decision card shows which memory blobs it used. If memory is unreachable, Yojimbo fails closed and does not defend.
 
-**This is not live on mainnet yet.** The Walrus Memory account ID is still pending, so zero memories are stored on mainnet. The event requires at least ten, and writing them is the first job once the ID arrives.
+**Honest status: ready, but no memories yet.** Yojimbo's own delegate key on our Walrus Memory account authenticates to the mainnet relayer. Zero memories are stored so far, and the event requires at least ten. Rules only go in through the chat agent's tools, and the shared free OpenRouter key hit its daily cap at 15:41 UTC on November 9. So the first rules are written after the daily reset, at 00:00 UTC on November 10. Walrus mainnet blobs also took over 60 seconds to certify, so each write now waits up to five minutes.
 
 ## How it learned over time
 
 Yojimbo doesn't train a model. By design, it learns the way a good bodyguard does, by remembering what its client said and corrected. Say it deposits collateral at 2 a.m. and you reply in the morning, "next time, ask me first." That reply becomes an override memory. The next time a similar situation comes up (same mode, similar ratio, similar price move), the engine recalls the override, follows it, and quotes your correction in the decision. A newer correction outranks an older one. Unit tests cover each case, including "no recalled rule means no action"; the suite has 14 passing tests.
 
-What exists today is a rehearsal. On a local fork of Sui mainnet, with real Move execution and no real money, Yojimbo funded its bot wallet, opened a position (deposit 10 USDC, borrow 5), and defended it on its own with a 5 USDC deposit. The risk ratio rose from 2.999 to 3.999. It then unwound the position and returned 19.82 of the 20 USDC. On the fork, the rule came from a local file, not from Walrus Memory. The fork proves the transactions and the decision logic, but not the memory.
+What exists today is a rehearsal. On a local fork of Sui mainnet, with real Move execution and no real money, Yojimbo funded its bot wallet, opened a position (deposit 10 USDC, borrow 5), and defended it on its own with a 5 USDC deposit. The risk ratio rose from 2.999 to 3.999. It then unwound the position and returned 19.82 of the 20 USDC. On the fork, the rule came from a local file, not from Walrus Memory. The fork proves the transactions and the decision logic, but not the memory. The memory loop on mainnet starts with the first rules after the November 10 reset. Until then, nothing here claims that Yojimbo has learned from Walrus.
 
 ## What's next
 
-1. Set the Walrus Memory account ID, then write at least ten memories to mainnet: the rules, the schedule, defence events and an override.
-2. Fund the hub, then run the same lifecycle on mainnet through Tatum, with Suiscan links in the README.
+1. After the OpenRouter reset, write at least ten memories to mainnet through the chat agent: the rules, the schedule, defence events and an override.
+2. Fund the hub, which funds the bot wallet (it exists and is unfunded today), then run the same lifecycle on mainnet through Tatum, with Suiscan links in the README.
 3. Film that run live, and report the real memory count.
 
 The chat agent runs on a free OpenRouter model, so it can be slow or rate-limited. It only parses intent and writes replies; decisions stay in tested code.
