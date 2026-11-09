@@ -19,6 +19,14 @@ pnpm dev
 
 Open <http://localhost:5173>. The server is on localhost port 8787. `pnpm build` and `pnpm test` run without credentials. `pnpm test:live` requires Tatum or `YOJIMBO_DEV_SUI_RPC=https://fullnode.mainnet.sui.io:443` for registry reads. The dev override uses Sui gRPC because the public fullnode no longer serves JSON-RPC. It is visibly labeled **dev RPC (not Tatum)** and cannot submit writes.
 
+## Watch mode
+
+Choose **Watch a position** under **On guard** to inspect real SUI/USDC MarginManagers without a bot key. The list comes from recent DeepBook Margin manager creation, borrow, collateral deposit and liquidation events. It is cached for five minutes in ignored `data/managers.json`; every displayed risk ratio and selected position state is read live. Managers are sorted by distance to the pool's liquidation ratio. Paste any SUI/USDC MarginManager ID to inspect its current assets, debt, oracle prices, thresholds and SuiScan object. The nearby liquidation list reports only positions in the current live sample; it can be empty.
+
+The watched decision runs the same deterministic `decide` engine at the current time. With Walrus Memory configured it recalls the watched owner's rules and schedules. Without memory it shows **defaults: no remembered rules (Walrus Memory setup required)**; the default alert ratio is 1.5 (or `YOJIMBO_ALERT_RATIO`), the per-action cap is `YOJIMBO_MAX_DEFENCE_USDC`, and no rule authorizes a defence. **Dry-run the defence** requires `YOJIMBO_BOT_KEY` and only simulates a position owned by that bot wallet. Watch mode never submits a transaction. Chat can read a watched position and list recent managers without memory, provided the agent model is configured; memory writes return **Setup required: Walrus Memory**.
+
+For an isolated walkthrough, run `PORT=8795 VITE_PORT=5185 YOJIMBO_DEV_SUI_RPC=https://fullnode.mainnet.sui.io:443 pnpm dev` and open <http://localhost:5185>. These ports are environment overrides; the normal defaults remain 8787 and 5173.
+
 Set `YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS` only after funding the bot wallet and reviewing its rules. Without it, the Tatum path builds each transaction and stops at `sui_dryRunTransactionBlock`. The dev gRPC path stops at `simulateTransaction`. The server checks `YOJIMBO_MAX_DEFENCE_USDC` per action and `YOJIMBO_DAILY_USDC` against successful mainnet defences. `create_margin_manager` and `open_position` in chat are also gated. Opening deposits USDC, borrows USDC and buys SUI through the bot-owned manager; it refuses a manager with existing debt.
 
 ## Loop
@@ -33,7 +41,7 @@ Chat uses OpenRouter tool calls for reads, rule and schedule entry, override rec
 
 ## HTTP
 
-`GET /status`, `/registry`, `/position`, `/memory`, `/events`, `/stream` (SSE); `POST /chat` (SSE) and `/decision`. The Vite app proxies these through `/api`. Both servers bind to localhost. Event rows are persisted in ignored `data/events.json`; Walrus is the source for decisions.
+`GET /status`, `/registry`, `/position`, `/managers/recent`, `/watch/:managerId`, `/memory`, `/events`, `/stream` (SSE); `POST /chat` (SSE), `/decision`, and `/watch/:managerId` with `{"action":"dry-run"}`. The Vite app proxies these through `/api`. Both servers bind to localhost. Event rows are persisted in ignored `data/events.json`; Walrus is the source for remembered decisions.
 
 See [TESTING.md](TESTING.md) for observed results and [BLOCKED.md](BLOCKED.md) for remaining setup.
 
