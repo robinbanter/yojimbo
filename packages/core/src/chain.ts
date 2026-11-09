@@ -1,4 +1,7 @@
 import { GrpcTransport } from '@protobuf-ts/grpc-transport';
+import { rateLimit } from './throttle.js';
+// One limiter for the whole process: every Tatum client shares Tatum's 3 requests/second budget.
+const tatumLimit = rateLimit(400);
 import { ChannelCredentials } from '@grpc/grpc-js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { deepbook, mainnetPackageIds, mainnetCoins, mainnetPools } from '@mysten/deepbook-v3';
@@ -42,19 +45,43 @@ export function rpc(env = process.env) {
   if (dev) { const url=env.YOJIMBO_DEV_SUI_RPC!; return {client:new SuiGrpcClient({network:'mainnet',baseUrl:url}), source:'dev RPC (not Tatum)' as const, url}; }
   // Tatum's Sui JSON-RPC gateway returns 404; it serves native gRPC (not gRPC-web) with the key in metadata.
   const host = 'sui-mainnet-grpc.gateway.tatum.io:443';
-  const transport = new GrpcTransport({host,channelCredentials:ChannelCredentials.createSsl(),meta:{'x-api-key':env.TATUM_API_KEY!}});
+  const transport = new GrpcTransport({host,channelCredentials:ChannelCredentials.createSsl(),meta:{'x-api-key':env.TATUM_API_KEY!},interceptors:[tatumLimit]});
   return {client:new SuiGrpcClient({network:'mainnet',transport}), source:'Tatum' as const, url:`grpc://${host}`};
+}
+/**
+ * Event listing. Tatum's gRPC gateway refuses sui.rpc.v2.LedgerService/ListEvents ("gRPC method not allowed"), so with
+ * Tatum the event scan goes to the public Sui fullnode over gRPC (YOJIMBO_EVENTS_RPC overrides it); every other read and
+ * every transaction still goes through Tatum. The source label says which one answered.
+ */
+export function eventsRpc(env = process.env) {
+  const r = rpc(env);
+  if (r.source !== 'Tatum') return r;
+  const url = env.YOJIMBO_EVENTS_RPC ?? 'https://fullnode.mainnet.sui.io:443';
+  return { client: new SuiGrpcClient({ network: 'mainnet', baseUrl: url }), source: 'public fullnode (events; Tatum blocks ListEvents)' as const, url };
 }
 export function chain(owner: string, managerId?: string, env = process.env) {
   const r = rpc(env);
   const options = {address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey:POOL}} : undefined};
   return {...r,client:r.client.$extend(deepbook(options))};
 }
+// Pool thresholds change only by governance: read them one call at a time (Tatum rate-limits bursts of parallel
+// calls with HTTP 429) and keep them for five minutes per transport.
+const registryCache = new Map<string, { at: number; value: unknown[] }>();
 export async function registry(owner: string, env = process.env) {
   const c=chain(owner,undefined,env);
-  const [enabled, liquidation, minBorrow, minWithdraw, basePool, quotePool] = await Promise.all([
-    c.client.deepbook.isPoolEnabledForMargin(POOL),c.client.deepbook.getLiquidationRiskRatio(POOL),c.client.deepbook.getMinBorrowRiskRatio(POOL),c.client.deepbook.getMinWithdrawRiskRatio(POOL),c.client.deepbook.getBaseMarginPoolId(POOL),c.client.deepbook.getQuoteMarginPoolId(POOL)
-  ]);
+  const hit = registryCache.get(String(c.source));
+  let values = hit && Date.now() - hit.at < 300_000 ? hit.value : null;
+  if (!values) {
+    values = [];
+    values.push(await c.client.deepbook.isPoolEnabledForMargin(POOL));
+    values.push(await c.client.deepbook.getLiquidationRiskRatio(POOL));
+    values.push(await c.client.deepbook.getMinBorrowRiskRatio(POOL));
+    values.push(await c.client.deepbook.getMinWithdrawRiskRatio(POOL));
+    values.push(await c.client.deepbook.getBaseMarginPoolId(POOL));
+    values.push(await c.client.deepbook.getQuoteMarginPoolId(POOL));
+    registryCache.set(String(c.source), { at: Date.now(), value: values });
+  }
+  const [enabled, liquidation, minBorrow, minWithdraw, basePool, quotePool] = values as any[];
   return {enabled,liquidation,minBorrow,minWithdraw,basePool:basePool.replace(/^0x0x/,'0x'),quotePool:quotePool.replace(/^0x0x/,'0x'),packageId:mainnetPackageIds.MARGIN_PACKAGE_ID,registryId:MARGIN_REGISTRY,source:c.source};
 }
 export async function position(owner: string, env = process.env) {
@@ -88,13 +115,14 @@ export async function watchPosition(managerId:string,env=process.env){
 }
 export async function discoverRecentManagers(limit=8,env=process.env):Promise<RecentManager[]>{
   const c=rpc(env).client;
+  const ev=eventsRpc(env).client;
   const registryObject=await c.core.getObject({objectId:MARGIN_REGISTRY});
   const originalPackage=registryObject.object?.type?.split('::')[0];
   if(!originalPackage||!addressPattern.test(originalPackage))throw new Error('Margin registry type unavailable');
   const seen=new Map<string,RecentManager>();
   let before:string|null|undefined;
   for(let page=0;page<10&&seen.size<limit;page++){
-    const response=await c.core.listEvents({filter:{eventType:`${originalPackage}::margin_manager`},order:'descending',limit:50,...(before?{before}:{})});
+    const response=await ev.core.listEvents({filter:{eventType:`${originalPackage}::margin_manager`},order:'descending',limit:50,...(before?{before}:{})});
     const activities=new Map<string,NonNullable<ReturnType<typeof parseManagerEvent>>>();
     for(const event of response.events){const item=parseManagerEvent(event);if(item&&!seen.has(item.managerId)&&!activities.has(item.managerId))activities.set(item.managerId,item);}
     const candidates=await Promise.all([...activities.values()].map(async activity=>{
