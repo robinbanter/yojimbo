@@ -209,3 +209,45 @@ export async function openLong(owner:string,managerId:string,depositUsdc:number,
   tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid:true,payWithDeep:false}));
   return setupTransaction(owner,tx,env);
 }
+/**
+ * Close the bot's position and return its funds, in three gated transactions (fork: LOCAL_FORK_ONLY gate;
+ * mainnet: YOJIMBO_ALLOW_MAINNET): 1. sell all whole SUI lots at market and repay the whole USDC loan;
+ * 2. withdraw everything left in the manager to the bot wallet; 3. send all of the bot's USDC and its remaining
+ * SUI (the gas coin, minus this transaction's gas) to `returnTo`. Each step re-reads chain state first.
+ */
+export async function unwindPosition(owner:string,managerId:string,returnTo:string,env=process.env){
+  if(!addressPattern.test(returnTo))throw new Error('Return address must be a 0x Sui address');
+  const steps:{step:string;result:unknown;state?:unknown}[]=[];
+  const read=async()=>{const s=(await managerState(managerId,env)).state;return {riskRatio:s.riskRatio,baseAsset:Number(s.baseAsset),quoteAsset:Number(s.quoteAsset),baseDebt:Number(s.baseDebt),quoteDebt:Number(s.quoteDebt)};};
+  const ok=(r:{status:{status:string}|null;txDigest:string|null})=>r.status?.status==='success'&&r.txDigest!=null;
+  let s=await read();
+  if(s.baseDebt>0)throw new Error('This unwind handles a SUI long with USDC debt; the manager has SUI debt');
+  const c=chain(owner,managerId,env);
+  const book=await c.client.deepbook.poolBookParams(POOL);
+  // Without DEEP the taker fee is paid in SUI from the manager, so sell 99% of the SUI (floored to lots); step 2 withdraws the rest.
+  const sellable=s.baseAsset*0.99;
+  if(s.quoteDebt>0||sellable>=book.minSize){
+    const tx=new Transaction();tx.setSender(owner);
+    if(sellable>=book.minSize)tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity:toLots(sellable,book.lotSize,book.minSize),isBid:false,payWithDeep:false}));
+    if(s.quoteDebt>0)tx.add(c.client.deepbook.marginManager.repayQuote('BOT'));
+    const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:'sell SUI lots and repay USDC loan',result:r,state:s});
+    if(!ok(r))return {done:false,steps};
+  }
+  if(s.quoteDebt>0)throw new Error(`USDC debt ${s.quoteDebt} remains after the sell`);
+  const usdc=Math.floor(s.quoteAsset*1e6)/1e6,sui=Math.floor(s.baseAsset*1e9)/1e9;
+  if(usdc>0||sui>0){
+    const tx=new Transaction();tx.setSender(owner);
+    const coins=[];
+    if(usdc>0)coins.push(tx.add(c.client.deepbook.marginManager.withdrawQuote('BOT',usdc)));
+    if(sui>0)coins.push(tx.add(c.client.deepbook.marginManager.withdrawBase('BOT',sui)));
+    tx.transferObjects(coins,owner);
+    const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:`withdraw ${usdc} USDC and ${sui} SUI to the bot wallet`,result:r,state:s});
+    if(!ok(r))return {done:false,steps};
+  }
+  const usdcCoins=await c.client.core.listCoins({owner,coinType:USDC});
+  const tx=new Transaction();tx.setSender(owner);
+  const objects=[...usdcCoins.objects.map(o=>tx.object(o.objectId)),tx.gas];
+  tx.transferObjects(objects,returnTo);
+  const r=await setupTransaction(owner,tx,env);steps.push({step:`return ${usdcCoins.objects.reduce((n,o)=>n+Number(o.balance),0)/1e6} USDC and all remaining SUI to ${returnTo}`,result:r});
+  return {done:ok(r),steps};
+}
