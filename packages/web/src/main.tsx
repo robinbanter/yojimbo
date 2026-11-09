@@ -9,6 +9,7 @@ type Hit = {
 type Decision = {
   mode: string;
   action: string;
+  amountUsdc: number;
   quote: string;
   recalledBlobIds: string[];
   nextWindow: string | null;
@@ -42,6 +43,7 @@ type Status = {
   pending: string[];
 };
 type Message = { role: string; text: string };
+type RecentManager = {managerId:string;owner:string;pool:string;lastActivity:string;activity:string;riskRatio:number;liquidationRatio:number};
 
 const api = (path: string) =>
   fetch(`/api${path}`).then(async (r) => {
@@ -66,6 +68,12 @@ function App() {
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [source, setSource] = useState<'bot'|'watch'>('watch');
+  const [managers, setManagers] = useState<RecentManager[]>([]);
+  const [watchId, setWatchId] = useState('');
+  const [pastedId, setPastedId] = useState('');
+  const [watched, setWatched] = useState<any>(null);
+  const [dryRun, setDryRun] = useState('');
 
   const refresh = async () => {
     const requests: [string, string, (v: any) => void][] = [
@@ -81,6 +89,7 @@ function App() {
         },
       ],
       ['events', '/events', (v) => setEvents(v.events)],
+      ['managers', '/managers/recent', (v) => setManagers(v.managers)],
     ];
     await Promise.all(
       requests.map(async ([name, path, save]) => {
@@ -110,6 +119,12 @@ function App() {
       stream.close();
     };
   }, []);
+  useEffect(()=>{if(source==='watch'&&!watchId&&managers.length)setWatchId(managers[0].managerId);},[source,watchId,managers]);
+  useEffect(()=>{
+    if(source!=='watch'||!watchId)return;
+    const load=async()=>{try{setWatched(await api(`/watch/${watchId}`));setErrors(e=>({...e,watch:''}));}catch(e){setWatched(null);setErrors(v=>({...v,watch:String((e as Error).message??e)}));}};
+    void load();const id=setInterval(load,15_000);return()=>clearInterval(id);
+  },[source,watchId]);
 
   const send = async (preset?: string) => {
     const text = (preset ?? draft).trim();
@@ -121,7 +136,7 @@ function App() {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text,watchManagerId:source==='watch'?watchId:undefined }),
       });
       if (!response.body) throw new Error('No stream');
       const reader = response.body.getReader();
@@ -168,14 +183,21 @@ function App() {
     }
   };
 
-  const state = position?.state;
+  const visiblePosition=source==='watch'?watched:position;
+  const visibleRegistry=source==='watch'?watched?.thresholds:registry;
+  const visibleDecision:Decision|null=source==='watch'?watched?.decision??null:decision;
+  const state = visiblePosition?.state;
   const ratio: number | undefined = state?.riskRatio;
-  const alert = decision?.alertRatio ?? 1.5;
-  const liquidation: number | undefined = registry?.liquidation;
-  const minBorrow: number | undefined = registry?.minBorrow;
+  const alert = visibleDecision?.alertRatio ?? 1.5;
+  const liquidation: number | undefined = visibleRegistry?.liquidation;
+  const minBorrow: number | undefined = visibleRegistry?.minBorrow;
   const pos = (v: number | undefined) => (v == null ? 0 : Math.max(0, Math.min(100, ((v - 1) / 1.5) * 100)));
   const kept = memory.filter((h) => ['schedule', 'rule', 'override'].includes(h.memory.kind));
   const memorySetup = status?.memory?.startsWith('Setup required');
+  const dryRunDefence=async()=>{
+    if(!watchId)return;
+    try{const response=await fetch(`/api/watch/${watchId}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'dry-run'})});const result=await response.json();setDryRun(response.ok?JSON.stringify(result):String(result.error));}catch(e){setDryRun(String((e as Error).message??e));}
+  };
 
   return (
     <div className="app">
@@ -249,6 +271,20 @@ function App() {
       <main className="grid">
         <section className="card guard" aria-labelledby="guard-title">
           <h2 id="guard-title">On guard</h2>
+          <div className="status" aria-label="Position source">
+            <button className={source==='bot'?'primary':''} onClick={()=>setSource('bot')}>Bot wallet</button>
+            <button className={source==='watch'?'primary':''} onClick={()=>setSource('watch')}>Watch a position</button>
+          </div>
+          {source==='watch'&&<>
+            <p className="pill">Recent real SUI/USDC managers · closest to liquidation first</p>
+            {managers.map(m=><button className="event" key={m.managerId} onClick={()=>{setWatched(null);setWatchId(m.managerId);setDryRun('');}}>{short(m.managerId)} · risk {m.riskRatio.toFixed(3)} · last {new Date(m.lastActivity).toLocaleString()}</button>)}
+            {errors.managers&&<p className="error">{errors.managers}</p>}
+            <form onSubmit={e=>{e.preventDefault();setWatched(null);setWatchId(pastedId.trim());setDryRun('');}}>
+              <input value={pastedId} onChange={e=>setPastedId(e.target.value)} placeholder="Paste a MarginManager ID" aria-label="MarginManager ID" />
+              <button className="primary">Watch</button>
+            </form>
+            {watched&&<p className="pill warn">Watching {short(watched.managerId)} (read-only, not yours: Yojimbo can't act on it)</p>}
+          </>}
           {state ? (
             <>
               <div className="ratio">
@@ -267,30 +303,42 @@ function App() {
                 <span className="al">Your alert {alert.toFixed(2)}</span>
               </div>
               <dl className="facts">
-                <Fact k="SUI price" v={`$${position.price?.toFixed(4) ?? '—'}`} />
+                <Fact k="SUI price" v={`$${visiblePosition.price?.toFixed(4) ?? '—'}`} />
+                {source==='watch'&&<Fact k="USDC oracle" v={`$${watched.quotePrice?.toFixed(4) ?? '—'}`} />}
                 <Fact k="Collateral" v={`${state.baseAsset} SUI`} />
                 <Fact k="Quote held" v={`${state.quoteAsset} USDC`} />
                 <Fact k="Debt" v={`${state.quoteDebt} USDC`} />
-                <Fact k="Mode now" v={decision?.mode ?? 'Memory setup required'} />
-                <Fact k="Next window" v={decision?.nextWindow ?? '—'} />
+                <Fact k="Mode now" v={visibleDecision?.mode ?? 'Memory setup required'} />
+                <Fact k="Next window" v={visibleDecision?.nextWindow ?? '—'} />
               </dl>
-              <a className="link" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${position.managerId}`}>
-                MarginManager {short(position.managerId)} ↗
+              <a className="link" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${visiblePosition.managerId}`}>
+                MarginManager {short(visiblePosition.managerId)} ↗
               </a>
+              {source==='watch'&&<>
+                <article className="event">
+                  <b>What Yojimbo would do right now</b>
+                  <p className="muted small">{watched.decisionSource}</p>
+                  <p>{visibleDecision?.mode} · {visibleDecision?.action} · {visibleDecision?.amountUsdc} USDC</p>
+                  <p>“{visibleDecision?.quote}”</p>
+                  <button className="primary" onClick={dryRunDefence}>Dry-run the defence</button>
+                  {dryRun&&<p className="notice">{dryRun}</p>}
+                </article>
+                <article className="event"><b>Nearby positions at liquidation</b><p>{managers.filter(m=>m.riskRatio<=m.liquidationRatio).length ? managers.filter(m=>m.riskRatio<=m.liquidationRatio).map(m=>`${short(m.managerId)} (${m.riskRatio.toFixed(3)})`).join(', ') : 'None in the recent live sample.'}</p></article>
+              </>}
             </>
           ) : (
             <Empty
               art="/art/yojimbo-empty-1.webp"
               title="Nothing to guard yet"
-              text={errors.position || 'No bot-owned MarginManager found. Fund the bot wallet and open a small SUI/USDC position to start guarding.'}
+              text={(source==='watch'?errors.watch:errors.position) || (source==='watch'?'Select a recent manager or paste its ID.':'No bot-owned MarginManager found. Fund the bot wallet and open a small SUI/USDC position to start guarding.')}
             />
           )}
-          {registry && (
+          {visibleRegistry && (
             <p className="muted small">
               Live pool thresholds from mainnet: liquidation {liquidation?.toFixed(2)}, min borrow {minBorrow?.toFixed(4)}.
             </p>
           )}
-          {errors.registry && <p className="error">Registry: {errors.registry}</p>}
+          {errors.registry&&source==='bot' && <p className="error">Registry: {errors.registry}</p>}
         </section>
 
         <section className="card chat-card" aria-labelledby="chat-title">
@@ -348,9 +396,9 @@ function App() {
             What it remembers <small>Walrus mainnet</small>
           </h2>
           {errors.memory && <p className="error">{errors.memory}</p>}
-          {decision && (
+          {visibleDecision && (
             <p className="recalled">
-              <b>RECALLED {decision.recalledBlobIds.length}</b> · next move: {decision.action} · “{decision.quote}”
+              <b>RECALLED {visibleDecision.recalledBlobIds.length}</b> · next move: {visibleDecision.action} · “{visibleDecision.quote}”
             </p>
           )}
           {kept.length ? (
@@ -427,7 +475,7 @@ function App() {
       </main>
 
       <footer className="foot">
-        Positions: DeepBook Margin on Sui mainnet · chain reads: Tatum Sui RPC · memory: Walrus Memory · art generated
+        Positions: DeepBook Margin on Sui mainnet · chain reads: {status?.rpc??'Setup required'} · memory: Walrus Memory · art generated
         with ChatGPT.
       </footer>
     </div>

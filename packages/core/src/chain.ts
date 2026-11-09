@@ -61,7 +61,7 @@ export async function position(owner: string, env = process.env) {
   const parsed=parseManagerState(state);
   return {owner,managerId,state:parsed.state,price:parsed.price,source:c.source};
 }
-export async function watchPosition(managerId:string,env=process.env){
+export async function managerState(managerId:string,env=process.env){
   if(!addressPattern.test(managerId))throw new Error('Invalid MarginManager ID');
   const base=rpc(env);
   const result=await base.client.core.getObject({objectId:managerId,include:{json:true}});
@@ -69,9 +69,13 @@ export async function watchPosition(managerId:string,env=process.env){
   const candidate=object&&parseManagerObject(object,{managerId:managerId.toLowerCase(),lastActivity:'',activity:'',checkpoint:null});
   if(!candidate)throw new Error('SUI/USDC MarginManager not found');
   const c=chain(candidate.owner,managerId,env);
-  const [state,thresholds]=await Promise.all([c.client.deepbook.getMarginManagerState('BOT'),registry(candidate.owner,env)]);
+  const state=await c.client.deepbook.getMarginManagerState('BOT');
   const parsed=parseManagerState(state);
-  return {owner:candidate.owner,managerId,state:parsed.state,price:parsed.price,quotePrice:parsed.quotePrice,thresholds,source:c.source};
+  return {owner:candidate.owner,managerId,state:parsed.state,price:parsed.price,quotePrice:parsed.quotePrice,source:c.source};
+}
+export async function watchPosition(managerId:string,env=process.env){
+  const [p,thresholds]=await Promise.all([managerState(managerId,env),registry('0x1',env)]);
+  return {...p,thresholds};
 }
 export async function discoverRecentManagers(limit=8,env=process.env):Promise<RecentManager[]>{
   const c=rpc(env).client;
