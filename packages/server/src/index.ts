@@ -186,6 +186,26 @@ const server=createServer(async(req,res)=>{try{
   const result=await executeDefence(watched.owner,watched.managerId,watched.decision.action,Math.min(watched.decision.amountUsdc,watched.caps.perActionUsdc),{baseAsset:s.baseAsset,baseDebt:s.baseDebt,quoteAsset:s.quoteAsset,quoteDebt:s.quoteDebt,price:watched.price},spentToday(),{...process.env,YOJIMBO_ALLOW_MAINNET:''});
   return json(res,200,result);
  }
+ // Setup writes for the bot's own position. Both go through core's write gate: without
+ // YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS they are built and dry-run only, never sent.
+ if((path==='/bot/create'||path==='/bot/open')&&req.method==='POST'){
+  if(!process.env.YOJIMBO_BOT_KEY)return json(res,400,{error:'Setup required: YOJIMBO_BOT_KEY'});
+  const address=owner();
+  const data=await body(req);
+  const existing=await position(address);
+  let result;
+  if(path==='/bot/create'){
+   if(existing.managerId)return json(res,409,{error:'Bot already has a MarginManager',managerId:existing.managerId});
+   result=await createMarginManager(address);
+  }else{
+   const p=await snapshot(address);
+   if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)return json(res,409,{error:'Position already has debt',managerId:p.managerId});
+   result=await openLong(address,p.managerId!,Number(data.depositUsdc),Number(data.borrowUsdc),p.price!);
+  }
+  const allowed=process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS';
+  const note=result.mode==='mainnet'?'Executed on mainnet':allowed?'Dry run did not succeed, nothing was sent':'Dry-run only: YOJIMBO_ALLOW_MAINNET is not set, nothing was sent';
+  return json(res,200,{...result,note});
+ }
  if(path==='/position')return json(res,200,await position(owner()));
  if(path==='/memory'){if(!process.env.YOJIMBO_BOT_KEY||!memoryReady())return json(res,200,{hits:[],decision:null,setup:'Setup required: Walrus Memory'});const address=owner();const hits=await memoryFor(address).recallQuery('Yojimbo all schedules rules overrides and owner preferences');let currentDecision:Decision|null=null;try{const {ctx}=await context(address);currentDecision=decide(await recall(address,ctx),ctx);}catch{}return json(res,200,{hits,decision:currentDecision});}
  if(path==='/events')return json(res,200,{events});
