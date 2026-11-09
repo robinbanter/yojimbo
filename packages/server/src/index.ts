@@ -177,7 +177,7 @@ const server=createServer(async(req,res)=>{try{
   const forkInfo=await forkLabel();
   return json(res,200,{fork:forkInfo,rpc:forkInfo?forkInfo.label:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:!fork&&process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,pending:[...pending.keys()]});}
  if(path==='/registry')return json(res,200,await registry(process.env.YOJIMBO_BOT_KEY?owner():'0x1'));
- if(path==='/managers/recent')return json(res,200,{managers:await recentWithRisk()});
+ if(path==='/managers/recent')return json(res,200,{managers:await recentCached()});
  const watchMatch=/^\/watch\/(0x[0-9a-fA-F]{64})$/.exec(path);
  if(watchMatch&&req.method==='GET')return json(res,200,await assessWatched(watchMatch[1]));
  if(watchMatch&&req.method==='POST'){
@@ -222,4 +222,8 @@ const server=createServer(async(req,res)=>{try{
  return json(res,404,{error:'Not found'});
 }catch(e){return json(res,500,{error:safeError(e)});}});
 server.listen(port,'127.0.0.1',()=>console.log(`Yojimbo server listening on localhost:${port}`));
+// The live manager scan takes about 40 s on Tatum's free plan, so the server keeps the last result and refreshes it in the background.
+let recentState:{at:number;value:Promise<Awaited<ReturnType<typeof recentWithRisk>>>}|null=null;let recentRefresh:Promise<Awaited<ReturnType<typeof recentWithRisk>>>|null=null;
+function recentCached(){const age=recentState?Date.now()-recentState.at:Infinity;if(age>60_000&&!recentRefresh){const next=recentWithRisk();recentRefresh=next;next.then(()=>{recentState={at:Date.now(),value:next}}).catch(()=>{}).finally(()=>{recentRefresh=null})}if(recentState&&age<600_000)return recentState.value;return recentRefresh??recentState!.value}
+void recentCached();setInterval(()=>void recentCached(),60_000).unref();
 setInterval(watch,15000);setTimeout(watch,1000);setInterval(dailySummary,60000);void telegramWorker();
