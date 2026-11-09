@@ -36,3 +36,7 @@ Chat uses OpenRouter tool calls for reads, rule and schedule entry, override rec
 `GET /status`, `/registry`, `/position`, `/memory`, `/events`, `/stream` (SSE); `POST /chat` (SSE) and `/decision`. The Vite app proxies these through `/api`. Both servers bind to localhost. Event rows are persisted in ignored `data/events.json`; Walrus is the source for decisions.
 
 See [TESTING.md](TESTING.md) for observed results and [BLOCKED.md](BLOCKED.md) for remaining setup.
+
+## Art
+
+Art generated with ChatGPT (image generation), directed in [docs/ART.md](docs/ART.md); source PNGs are not committed, the web app ships WebP copies in `packages/web/public/art/`.
