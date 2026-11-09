@@ -476,7 +476,9 @@ function App() {
                   </div>
                 </dl>
                 {!status?.wallet && <code className="vars">YOJIMBO_BOT_KEY</code>}
-                {status?.watcherError && <p className="error">{status.watcherError.replace(/^Error:\s*/, '')}</p>}
+                {status?.watcherError && !/^(Error:\s*)?Setup required/.test(status.watcherError) && (
+                  <p className="error">{status.watcherError.replace(/^Error:\s*/, '')}</p>
+                )}
               </div>
             )}
           </section>
@@ -577,7 +579,9 @@ function App() {
                 <img src={source === 'bot' ? '/art/yojimbo-seal-wallet.webp' : '/art/yojimbo-lantern-safe.webp'} alt="" width={140} height={140} />
                 <h3>{source === 'bot' && /Setup required/.test(errors.position ?? '') ? 'Setup required' : 'Nothing to guard yet'}</h3>
                 <p>
-                  {watchError ||
+                  {(source === 'bot' && /YOJIMBO_BOT_KEY/.test(errors.position ?? '')
+                    ? 'Yojimbo needs its own bot wallet key before it can guard a position it owns.'
+                    : watchError) ||
                     (source === 'watch'
                       ? 'Pick a manager on the left or paste its ID.'
                       : 'No bot-owned MarginManager found. Fund the bot wallet and open a small SUI/USDC position to start guarding.')}

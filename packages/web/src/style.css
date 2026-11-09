@@ -262,6 +262,7 @@ a.link .mono { color: var(--muted); font-weight: 500; }
 .chip:hover:not(:disabled) { border-color: var(--indigo); background: var(--indigo-tint); }
 .message { display: flex; gap: 10px; align-items: flex-start; animation: rise 280ms var(--ease) both; }
 .message.you { justify-content: flex-end; }
+.message.error { background: none; padding: 0; margin: 0; border-radius: 0; color: inherit; font-size: inherit; }
 .message .avatar { border-radius: 50%; flex: none; margin-top: 2px; box-shadow: 0 0 0 1px var(--paper-3); }
 .msg-col { display: flex; flex-direction: column; gap: 8px; max-width: 88%; min-width: 0; }
 .message.you .msg-col { align-items: flex-end; }
