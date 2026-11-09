@@ -16,6 +16,6 @@ export function memoryFor(owner: string, env = process.env) {
       const batches=await Promise.all(queries.map(query=>retry(async () => (await client.recall({query, topK: 40})).results.flatMap(r => { const memory = decodeMemory(r.text); return memory ? [{blobId:r.blob_id,memory,distance:r.distance}] : []; }))));
       return [...new Map(batches.flat().map(h=>[h.blobId,h])).values()];
     },
-    remember: (memory: Memory): Promise<string> => { const task = queue.then(() => retry(async () => (await client.rememberAndWait(encodeMemory(memory))).blob_id)); queue = task.then(()=>{},()=>{}); return task; },
+    remember: (memory: Memory): Promise<string> => { const task = queue.then(() => retry(async () => (await client.rememberAndWait(encodeMemory(memory), { timeoutMs: 300_000 })).blob_id)); queue = task.then(()=>{},()=>{}); return task; },
   };
 }
