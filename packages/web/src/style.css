@@ -121,6 +121,19 @@ p { margin: 0; }
 .mode-inline { display: none; }
 .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #6ccf95; animation: pulse 2.4s var(--ease) infinite; flex: none; }
 
+/* ── Local fork: unmistakable, never mistaken for mainnet ── */
+.fork-banner { display: flex; align-items: center; gap: 12px; width: calc(100% + 48px); margin: 0 -24px; padding: 7px 24px; background: repeating-linear-gradient(135deg, #f0c987 0 14px, #e8b96a 14px 28px); color: #2b1d02; font-size: 13.5px; font-weight: 500; }
+.fork-banner b { font: 700 12px var(--mono); letter-spacing: 0.12em; background: #2b1d02; color: #f0c987; padding: 3px 8px; border-radius: 5px; flex: none; }
+.fork-banner span { min-width: 0; }
+.mode-pill.fork { border-color: var(--gold); color: var(--gold); }
+.mode-pill.fork i { background: var(--gold); box-shadow: 0 0 0 3px rgba(240, 201, 135, 0.25); }
+.live-dot.fork { background: var(--gold); animation: none; }
+.fork-word { font-weight: 600; color: var(--gold); }
+.fork-tag { display: inline-block; font: 700 10.5px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: #5a3d03; background: var(--amber-tint); border: 1px solid #e3c47f; border-radius: 5px; padding: 1px 6px; vertical-align: 1px; }
+.local-ref { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); min-height: 32px; overflow-wrap: anywhere; }
+.local-ref .mono { overflow-wrap: anywhere; word-break: break-all; }
+@media (min-width: 1221px) { .app.has-fork .console { height: calc(100vh - 68px - 86px - 20px - 34px); } }
+
 /* ── Journey: get guarded in 4 steps ─────────────────────── */
 .stepper { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 9px 14px; border-radius: 18px; background: rgba(18, 24, 51, 0.62); border: 1px solid rgba(243, 236, 220, 0.28); color: var(--on-night); text-align: left; transition: border-color 160ms var(--ease), background 160ms var(--ease); }
 .stepper:hover, .stepper[aria-expanded='true'] { border-color: rgba(243, 236, 220, 0.55); background: rgba(30, 38, 76, 0.75); }
@@ -229,9 +242,9 @@ p { margin: 0; }
 .inst-title { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
 .inst-head h2 { font-size: 28px; line-height: 1.05; }
 .inst-head .tag { font-weight: 500; }
-a.link { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid var(--paper-3); border-radius: 999px; text-decoration: none; font-size: 13.5px; font-weight: 600; background: #fff; transition: border-color 160ms var(--ease); }
+.link { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid var(--paper-3); border-radius: 999px; text-decoration: none; font-size: 13.5px; font-weight: 600; background: #fff; transition: border-color 160ms var(--ease); }
 a.link:hover { border-color: var(--indigo); }
-a.link .mono { color: var(--muted); font-weight: 500; }
+.link .mono { color: var(--muted); font-weight: 500; }
 .ico { flex: none; }
 .inst-main { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .ratio { display: flex; flex-direction: column; min-width: 0; }
@@ -500,6 +513,7 @@ a.link .mono { color: var(--muted); font-weight: 500; }
 }
 @media (max-width: 560px) {
   .keys-sum, .top .mode-pill, .brand em { display: none; }
+  .fork-banner { width: calc(100% + 32px); margin: 0 -16px; padding: 7px 16px; font-size: 12.5px; align-items: flex-start; }
   .sp { padding-right: 8px; font-size: 12.5px; gap: 4px; }
   .mode-inline { display: inline; }
   .mode-pill, .keys-btn { padding: 0 12px; font-size: 13px; }
@@ -508,7 +522,7 @@ a.link .mono { color: var(--muted); font-weight: 500; }
   .console-head p { font-size: 13px; }
   .panel { border-radius: 20px; }
   .inst-head h2 { font-size: 24px; }
-  a.link { margin-left: 0; }
+  .link { margin-left: 0; }
   .inst-main { align-items: center; gap: 8px; }
   .ratio b { font-size: 62px; }
   .ratio-label { font-size: 13px; }

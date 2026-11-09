@@ -39,6 +39,7 @@ type Status = {
   balanceMist: string | null;
   usdcBalance: string | null;
   mainnetWrites: boolean;
+  fork?: { label: string; forkedAtCheckpoint: string; checkpoint: string; clockMs: number; writes: boolean } | null;
   watcherError: string | null;
   pending: string[];
 };
@@ -136,6 +137,8 @@ function App() {
   const [approved, setApproved] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
   const [journeyOpen, setJourneyOpen] = useState(false);
+  const [botWatched, setBotWatched] = useState<any>(null);
+  const autoBot = useRef(false);
 
   const refresh = async () => {
     const requests: [string, string, (v: any) => void][] = [
@@ -184,6 +187,27 @@ function App() {
   useEffect(() => {
     if (source === 'watch' && !watchId && managers?.length) setWatchId(managers[0].managerId);
   }, [source, watchId, managers]);
+  useEffect(() => {
+    // On a local fork the point is the bot's own position, so open on it once.
+    if (status?.fork && !autoBot.current) {
+      autoBot.current = true;
+      setSource('bot');
+    }
+  }, [status?.fork]);
+  const botManagerId: string | undefined = position?.managerId ?? undefined;
+  useEffect(() => {
+    if (source !== 'bot' || !botManagerId) return;
+    const load = async () => {
+      try {
+        setBotWatched(await api(`/watch/${botManagerId}`));
+      } catch {
+        setBotWatched(null);
+      }
+    };
+    void load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
+  }, [source, botManagerId]);
   useEffect(() => {
     if (source !== 'watch' || !watchId) return;
     const load = async () => {
@@ -281,7 +305,12 @@ function App() {
 
   const visiblePosition = source === 'watch' ? watched : position;
   const visibleRegistry = source === 'watch' ? watched?.thresholds : registry;
-  const visibleDecision: Decision | null = source === 'watch' ? watched?.decision ?? null : decision;
+  const visibleDecision: Decision | null = source === 'watch' ? watched?.decision ?? null : decision ?? botWatched?.decision ?? null;
+  const activeAssess = source === 'watch' ? watched : botWatched;
+  const activeId = source === 'watch' ? watchId : botManagerId;
+  const fork = status?.fork ?? null;
+  const writesLive = !!(fork ? fork.writes : status?.mainnetWrites);
+  const where = fork ? 'the local fork' : 'Sui mainnet';
   const state = visiblePosition?.state;
   const ratio: number | undefined = state?.riskRatio;
   const alert = visibleDecision?.alertRatio ?? 1.5;
@@ -310,10 +339,10 @@ function App() {
   const memorySetup = status?.memory?.startsWith('Setup required');
   const atLiq = (managers ?? []).filter((m) => m.riskRatio <= m.liquidationRatio);
   const dryRunDefence = async () => {
-    if (!watchId || dryBusy) return;
+    if (!activeId || dryBusy) return;
     setDryBusy(true);
     try {
-      const response = await fetch(`/api/watch/${watchId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'dry-run' }) });
+      const response = await fetch(`/api/watch/${activeId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'dry-run' }) });
       const result = await response.json();
       setDryRun(response.ok ? { ok: true, text: result.outcome ? String(result.outcome) : JSON.stringify(result) } : { ok: false, text: String(result.error) });
     } catch (e) {
@@ -336,7 +365,7 @@ function App() {
       : 'seated';
   const keys = status
     ? [
-        { label: 'Chain reads', value: status.rpc, level: status.rpc.startsWith('Setup') ? 'setup' : status.rpc.startsWith('dev') ? 'warn' : 'ok' },
+        { label: 'Chain reads', value: status.rpc, level: status.rpc.startsWith('Setup') ? 'setup' : status.fork || status.rpc.startsWith('dev') ? 'warn' : 'ok' },
         { label: 'Walrus Memory', value: status.memory, level: status.memory.startsWith('Setup') ? 'setup' : 'ok' },
         { label: 'Bot wallet', value: status.wallet ? short(status.wallet) : 'Setup required: YOJIMBO_BOT_KEY', level: status.wallet ? 'ok' : 'setup' },
         { label: 'Telegram', value: status.telegram, level: status.telegram.startsWith('Setup') ? 'setup' : 'ok' },
@@ -344,13 +373,20 @@ function App() {
       ]
     : [];
   const watchError = source === 'watch' ? errors.watch || errors.managers : errors.position;
-  if (status) keys.push({ label: 'Writes', value: status.mainnetWrites ? 'Mainnet enabled' : 'Dry-run only (YOJIMBO_ALLOW_MAINNET unset)', level: status.mainnetWrites ? 'ok' : 'warn' });
+  if (status)
+    keys.push(
+      fork
+        ? { label: 'Writes', value: fork.writes ? 'Real transactions on the local fork only' : 'Simulated on the fork only', level: 'warn' }
+        : { label: 'Writes', value: status.mainnetWrites ? 'Mainnet enabled' : 'Dry-run only (YOJIMBO_ALLOW_MAINNET unset)', level: status.mainnetWrites ? 'ok' : 'warn' },
+    );
+  const localRuleIds = (visibleDecision?.recalledBlobIds ?? []).filter((id) => id.startsWith('local-file:'));
+  const localRules = !!fork && (memory.some((h) => h.blobId.startsWith('local-file:')) || localRuleIds.length > 0);
   const toChat = (preset?: string) => {
     document.getElementById('chat')?.scrollIntoView({ behavior: RM() ? 'auto' : 'smooth', block: 'center' });
     if (preset) void send(preset);
     else (document.querySelector('.composer input') as HTMLInputElement | null)?.focus({ preventScroll: true });
   };
-  const steps4 = journeySteps(status, position, kept.length, !!memorySetup);
+  const steps4 = journeySteps(status, position, kept.length || (localRules ? localRuleIds.length || 1 : 0), !!memorySetup && !localRules, writesLive);
   const journey = (variant: 'panel' | 'inline') => (
     <Journey
       variant={variant}
@@ -361,6 +397,9 @@ function App() {
       caps={watched?.caps}
       rulesCount={kept.length}
       memorySetup={!!memorySetup}
+      fork={fork}
+      localRules={localRules}
+      writesLive={writesLive}
       states={steps4}
       busy={busy}
       onRules={toChat}
@@ -369,7 +408,7 @@ function App() {
   );
 
   return (
-    <div className="app">
+    <div className={`app ${fork ? 'has-fork' : ''}`}>
       <a className="skip" href="#console">
         Skip to the guard console
       </a>
@@ -381,6 +420,14 @@ function App() {
           <span className="stage-shade" />
         </div>
 
+        {fork && (
+          <div className="fork-banner" role="note">
+            <b>LOCAL FORK</b>
+            <span>
+              {fork.label} · now at checkpoint {fork.checkpoint} · transactions run only on this machine, never on mainnet
+            </span>
+          </div>
+        )}
         <header className="top">
           <a className="brand" href="#top" aria-label="Yojimbo home">
             <img src="/art/yojimbo-mark.webp" alt="" width={36} height={36} />
@@ -396,9 +443,9 @@ function App() {
           </nav>
           <div className="top-right">
             <Keys keys={keys} error={errors.status} />
-            <span className={`mode-pill ${status?.mainnetWrites ? 'live' : ''}`}>
+            <span className={`mode-pill ${fork ? 'fork' : status?.mainnetWrites ? 'live' : ''}`}>
               <i aria-hidden="true" />
-              {status ? (status.mainnetWrites ? 'Real funds' : 'Dry-run only') : 'Connecting…'}
+              {status ? (fork ? (fork.writes ? 'Fork writes on' : 'Fork, simulate only') : status.mainnetWrites ? 'Real funds' : 'Dry-run only') : 'Connecting…'}
             </span>
           </div>
         </header>
@@ -409,8 +456,11 @@ function App() {
               A bodyguard for your leverage <em>while you sleep.</em>
             </h1>
             <p>
-              <span className="live-dot" aria-hidden="true" /> DeepBook Margin · SUI/USDC · read live from Sui mainnet every 15 s
-              {status && <span className="mode-inline"> · {status.mainnetWrites ? 'real funds' : 'dry-run only'}</span>}
+              <span className={`live-dot ${fork ? 'fork' : ''}`} aria-hidden="true" /> DeepBook Margin · SUI/USDC ·{' '}
+              {fork ? <b className="fork-word">{fork.label}</b> : 'read live from Sui mainnet'} every 15 s
+              {status && (
+                <span className="mode-inline"> · {fork ? (fork.writes ? 'fork writes on' : 'fork, simulate only') : status.mainnetWrites ? 'real funds' : 'dry-run only'}</span>
+              )}
             </p>
           </div>
           <button className="stepper" aria-expanded={journeyOpen} aria-controls="journey" onClick={() => setJourneyOpen((v) => !v)}>
@@ -484,7 +534,7 @@ function App() {
                     ))}
                   </div>
                 ) : (
-                  !errors.managers && <p className="rail-note">No recent SUI/USDC managers found on mainnet.</p>
+                  !errors.managers && <p className="rail-note">No recent SUI/USDC managers found.</p>
                 )}
                 {errors.managers && <p className="error">Managers: {errors.managers}</p>}
                 <form
@@ -519,7 +569,7 @@ function App() {
                   </div>
                   <div>
                     <dt>Writes</dt>
-                    <dd>{status?.mainnetWrites ? 'Mainnet enabled' : 'Dry-run only'}</dd>
+                    <dd>{fork ? (fork.writes ? 'Local fork only' : 'Fork, simulate only') : status?.mainnetWrites ? 'Mainnet enabled' : 'Dry-run only'}</dd>
                   </div>
                 </dl>
                 {!status?.wallet && <code className="vars">YOJIMBO_BOT_KEY</code>}
@@ -558,13 +608,20 @@ function App() {
                 <h2 id="position-title">{source === 'watch' ? 'Watched position' : 'Your position'}</h2>
                 {source === 'watch' && watched && <span className="tag">Read-only · not yours, Yojimbo can’t act on it</span>}
               </div>
-              {visiblePosition?.managerId && (
-                <a className="link" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${visiblePosition.managerId}`}>
-                  <span>MarginManager</span>
-                  <span className="mono">{short(visiblePosition.managerId)}</span>
-                  <ArrowOut />
-                </a>
-              )}
+              {visiblePosition?.managerId &&
+                (fork ? (
+                  <span className="link fork-ref" title={`${visiblePosition.managerId} (state read from the local fork; not a Suiscan link)`}>
+                    <span>MarginManager</span>
+                    <span className="mono">{short(visiblePosition.managerId)}</span>
+                    <ForkTag />
+                  </span>
+                ) : (
+                  <a className="link" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${visiblePosition.managerId}`}>
+                    <span>MarginManager</span>
+                    <span className="mono">{short(visiblePosition.managerId)}</span>
+                    <ArrowOut />
+                  </a>
+                ))}
             </div>
             {state ? (
               <>
@@ -615,11 +672,13 @@ function App() {
                 </dl>
               </>
             ) : source === 'watch' && watchId && !errors.watch ? (
-              <div className="pos-skeleton" aria-label="Reading the position from mainnet">
+              <div className="pos-skeleton" aria-label={`Reading the position from ${where}`}>
                 <span className="s1" />
                 <span className="s2" />
                 <span className="s3" />
-                <p>Reading {short(watchId)} from Sui mainnet…</p>
+                <p>
+                  Reading {short(watchId)} from {where}…
+                </p>
               </div>
             ) : source === 'bot' ? (
               journey('inline')
@@ -632,7 +691,7 @@ function App() {
             )}
             {visibleRegistry && (
               <p className="thresholds">
-                Pool thresholds read from mainnet: liquidation {liquidation?.toFixed(2)}, minimum borrow {minBorrow?.toFixed(4)}.
+                Pool thresholds read from {fork ? 'the local fork' : 'mainnet'}: liquidation {liquidation?.toFixed(2)}, minimum borrow {minBorrow?.toFixed(4)}.
               </p>
             )}
             {errors.registry && source === 'bot' && <p className="error">Registry: {errors.registry}</p>}
@@ -721,12 +780,12 @@ function App() {
       </div>
 
       <div className="paper">
-        {source === 'watch' && state && (
+        {state && activeAssess && (
           <section className="band decision" id="decision" aria-labelledby="decision-title">
             <div className="band-side">
               <p className="kicker">Decision</p>
               <h2 id="decision-title">What Yojimbo would do right now</h2>
-              <p className="band-note">{watched.decisionSource}</p>
+              <p className="band-note">{activeAssess.decisionSource}</p>
             </div>
             <div className="band-main">
               <div className="verdict">
@@ -744,7 +803,7 @@ function App() {
                 </div>
               </div>
               <blockquote>“{visibleDecision?.quote}”</blockquote>
-              {visibleDecision?.action === 'ignore' && /no remembered rules/i.test(String(watched?.decisionSource ?? '')) && (
+              {visibleDecision?.action === 'ignore' && /no remembered rules/i.test(String(activeAssess?.decisionSource ?? '')) && (
                 <p className="hint">No rules yet, so Yojimbo only watches. Tell it in chat what to do, e.g. “below 1.15, add 10 USDC”.</p>
               )}
               <div className="decision-actions">
@@ -772,8 +831,9 @@ function App() {
 
         <section className="band memory-band" id="memory" aria-labelledby="memory-title">
           <div className="band-side">
-            <p className="kicker">Walrus mainnet</p>
+            <p className="kicker">{localRules ? 'Local rules file (fork)' : 'Walrus mainnet'}</p>
             <h2 id="memory-title">What it remembers</h2>
+            {localRules && <p className="band-note">Read from docs/fork-rules.json on this machine. This is not Walrus Memory, which still needs setup.</p>}
             <img className="band-art" src="/art/yojimbo-scroll-rules.webp" alt="" width={160} height={160} />
           </div>
           <div className="band-main">
@@ -799,12 +859,30 @@ function App() {
                           replaces: <s>{old?.memory.text ?? h.memory.supersedes}</s>
                         </p>
                       )}
-                      <a target="_blank" rel="noreferrer" href={`https://walruscan.com/mainnet/blob/${h.blobId}`}>
-                        <span className="mono">{short(h.blobId)}</span> <ArrowOut />
-                      </a>
+                      {h.blobId.startsWith('local-file:') ? (
+                        <span className="local-ref">
+                          <span className="mono">{h.blobId}</span> <ForkTag text="local file" />
+                        </span>
+                      ) : (
+                        <a target="_blank" rel="noreferrer" href={`https://walruscan.com/mainnet/blob/${h.blobId}`}>
+                          <span className="mono">{short(h.blobId)}</span> <ArrowOut />
+                        </a>
+                      )}
                     </article>
                   );
                 })}
+              </div>
+            ) : localRules ? (
+              <div className="memories">
+                {localRuleIds.map((id) => (
+                  <article className="memory kind-rule" key={id}>
+                    <span className="type">Recalled from the local rules file</span>
+                    <p className="mono">{id.replace(/^local-file:/, '')}</p>
+                    <span className="local-ref">
+                      <span className="mono">{id}</span> <ForkTag text="local file" />
+                    </span>
+                  </article>
+                ))}
               </div>
             ) : (
               <Empty
@@ -847,11 +925,16 @@ function App() {
                       Recalled {e.recalledBlobIds.length} · rules {e.ruleIds.join(', ') || 'none'}
                     </p>
                     <div className="links">
-                      {e.txDigest && (
-                        <a target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/tx/${e.txDigest}`}>
-                          transaction <ArrowOut />
-                        </a>
-                      )}
+                      {e.txDigest &&
+                        (fork || /fork/i.test(e.outcome) ? (
+                          <span className="local-ref" title="This transaction exists only on the local fork; it is not on Suiscan">
+                            <span className="mono">{e.txDigest}</span> <ForkTag />
+                          </span>
+                        ) : (
+                          <a target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/tx/${e.txDigest}`}>
+                            transaction <ArrowOut />
+                          </a>
+                        ))}
                       {e.memoryBlobId && (
                         <a target="_blank" rel="noreferrer" href={`https://walruscan.com/mainnet/blob/${e.memoryBlobId}`}>
                           event memory <ArrowOut />
@@ -892,7 +975,7 @@ function App() {
         <footer className="foot">
           <img src="/art/yojimbo-mark.webp" alt="" width={22} height={22} />
           <span>
-            Positions: DeepBook Margin on Sui mainnet · chain reads: {status?.rpc ?? 'Setup required'} · memory: Walrus Memory · art generated with ChatGPT.
+            Positions: DeepBook Margin on {fork ? fork.label : 'Sui mainnet'} · chain reads: {status?.rpc ?? 'Setup required'} · memory: {localRules ? 'local rules file (fork), not Walrus Memory' : 'Walrus Memory'} · art generated with ChatGPT.
           </span>
         </footer>
       </section>
@@ -902,7 +985,7 @@ function App() {
 
 type StepState = 'done' | 'todo' | 'setup' | 'loading';
 const JOURNEY_SHORT = ['Fund', 'Open', 'Rules', 'Watch'];
-function journeySteps(status: Status | null, position: any, rules: number, memorySetup: boolean): StepState[] {
+function journeySteps(status: Status | null, position: any, rules: number, memorySetup: boolean, writesLive: boolean): StepState[] {
   if (!status) return ['loading', 'loading', 'loading', 'loading'];
   const wallet = !!status.wallet;
   const funded = wallet && Number(status.balanceMist) > 0 && Number(status.usdcBalance) > 0;
@@ -911,7 +994,7 @@ function journeySteps(status: Status | null, position: any, rules: number, memor
     !wallet ? 'setup' : funded ? 'done' : 'todo',
     !wallet ? 'setup' : open ? 'done' : 'todo',
     memorySetup ? 'setup' : rules > 0 ? 'done' : 'todo',
-    open && status.mainnetWrites ? 'done' : !wallet ? 'setup' : 'todo',
+    open && writesLive ? 'done' : !wallet ? 'setup' : 'todo',
   ];
 }
 const STATE_WORD: Record<StepState, string> = { done: 'Done', todo: 'To do', setup: 'Setup required', loading: 'Checking…' };
@@ -923,9 +1006,11 @@ async function post(path: string, data: unknown) {
   if (!r.ok) throw new Error(String(v.error || `HTTP ${r.status}`).replace(/^Error:\s*/, ''));
   return v;
 }
+const sent = (r: any) => r?.mode === 'mainnet' || r?.mode === 'fork';
 const outcome = (r: any) => {
-  const failed = r?.status?.status === 'failure' ? ` · dry run failed: ${r.status.error ?? 'unknown error'}` : '';
-  return `${r.note ?? r.mode}${r.txDigest ? ` · tx ${short(String(r.txDigest))}` : ''}${failed}`;
+  const failed = r?.status?.status === 'failure' ? ` · ${sent(r) ? 'failed' : 'dry run failed'}: ${r.status.error ?? 'unknown error'}` : '';
+  const tx = r.txDigest ? ` · tx ${String(r.txDigest)}${r.mode === 'fork' ? ' (fork only, not on Suiscan)' : ''}` : '';
+  return `${r.note ?? r.mode}${tx}${failed}`;
 };
 
 /** The newcomer's path, with live status on every step: fund the bot wallet, open the position, give it rules,
@@ -940,6 +1025,9 @@ function Journey(props: {
   caps?: { perActionUsdc: number; dailyUsdc: number };
   rulesCount: number;
   memorySetup: boolean;
+  fork: Status['fork'];
+  localRules: boolean;
+  writesLive: boolean;
   states: StepState[];
   busy: boolean;
   onRules: (preset?: string) => void;
@@ -984,14 +1072,14 @@ function Journey(props: {
     try {
       if (!hasManager) {
         const r = await post('/bot/create', {});
-        lines.push({ label: 'Create the MarginManager', text: outcome(r), ok: r.mode === 'mainnet' });
-        if (r.mode !== 'mainnet') {
+        lines.push({ label: 'Create the MarginManager', text: outcome(r), ok: sent(r) });
+        if (!sent(r)) {
           lines.push({ label: 'Deposit, borrow and buy SUI', text: 'Not run: the manager only exists on chain once the create transaction is sent.', ok: false });
           return;
         }
       }
       const o = await post('/bot/open', { depositUsdc: d, borrowUsdc: b });
-      lines.push({ label: 'Deposit, borrow and buy SUI', text: outcome(o), ok: o.mode === 'mainnet' });
+      lines.push({ label: 'Deposit, borrow and buy SUI', text: outcome(o), ok: sent(o) });
     } catch (e) {
       lines.push({ label: 'Refused', text: String((e as Error).message ?? e), ok: false });
     } finally {
@@ -1020,6 +1108,7 @@ function Journey(props: {
                 {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
+            {props.fork && <p className="jfine">Fork balances: funded from the fork-only hub wallet (scripts/fork-demo.sh). Nothing here is on mainnet.</p>}
             <dl className="jbal">
               <div>
                 <dt>SUI</dt>
@@ -1107,8 +1196,12 @@ function Journey(props: {
           <h3>Tell it your rules</h3>
           {chip(2)}
         </div>
-        <p className="jtext">Say when you sleep or fly and what it may do. Each one is kept on Walrus Memory and quoted when Yojimbo acts.</p>
-        {props.memorySetup && (
+        <p className="jtext">
+          Say when you sleep or fly and what it may do. Each one is {props.localRules ? 'recalled' : 'kept on Walrus Memory'} and quoted when Yojimbo acts.
+        </p>
+        {props.localRules ? (
+          <p className="jfine">On this fork the rules come from the local rules file docs/fork-rules.json, not Walrus Memory.</p>
+        ) : props.memorySetup && (
           <p className="jsetup">
             Setup required: <code>MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID</code>
           </p>
@@ -1137,7 +1230,17 @@ function Journey(props: {
           first: Approve, Reduce or Ignore.
         </p>
         <p className="jfine">
-          Now: {status ? (status.mainnetWrites ? 'mainnet writes enabled' : 'dry-run only, nothing is sent') : 'connecting'} · alerts{' '}
+          Now:{' '}
+          {status
+            ? props.fork
+              ? props.fork.writes
+                ? 'real transactions on the local fork only, never mainnet'
+                : 'simulated on the local fork, nothing is sent'
+              : status.mainnetWrites
+                ? 'mainnet writes enabled'
+                : 'dry-run only, nothing is sent'
+            : 'connecting'}{' '}
+          · alerts{' '}
           {status?.telegram?.startsWith('Setup') ? 'in this page only (Telegram not set up)' : 'here and on Telegram'}.
         </p>
       </li>
@@ -1156,7 +1259,7 @@ const fmtAmt = (v: unknown) => {
 function Gauge({ ratio, liquidation, minBorrow, alert, tier }: { ratio: number; liquidation?: number; minBorrow?: number; alert: number; tier: Tier }) {
   const liq = liquidation ?? 1.1;
   const LINE = 26,
-    FLOOR = 90,
+    FLOOR = 78,
     TOP = 1.8;
   const y = (r: number) => LINE + (FLOOR - LINE) * Math.max(0, Math.min(1, (r - liq) / (TOP - liq)));
   const sea = ratio <= liq ? LINE - 6 : y(ratio);
@@ -1187,7 +1290,9 @@ function Gauge({ ratio, liquidation, minBorrow, alert, tier }: { ratio: number; 
           <svg className="wave front" viewBox="0 0 800 40" preserveAspectRatio="none" aria-hidden="true">
             <path d={wave} />
           </svg>
-          <span className="sea-label num">{ratio >= 1000 ? '1000 · max' : ratio.toFixed(3)} now</span>
+          <span className="sea-label num">
+            {ratio >= 1000 ? '1000 · max' : ratio.toFixed(3)} now{ratio > TOP ? ' · above this scale' : ''}
+          </span>
         </div>
       </div>
     </div>
@@ -1364,6 +1469,8 @@ function Empty({ art, title, text, detail }: { art: string; title: string; text:
     </div>
   );
 }
+
+const ForkTag = ({ text = 'fork' }: { text?: string }) => <span className="fork-tag">{text}</span>;
 
 const ArrowOut = () => (
   <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="ico">
