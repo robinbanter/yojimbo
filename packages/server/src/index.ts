@@ -123,7 +123,7 @@ async function chat(res:ServerResponse,prompt:string,watchManagerId?:string){
    }
   }
   send('message',{text:'Tool limit reached. Please continue in a new message.'});send('done',{});
- }catch(e){send('error',{message:safeError(e)});send('done',{});}res.end();
+ }catch(e){send('error',{message:safeError(e)});send('done',{});}finally{res.end()}
 }
 async function watch(){
  try{

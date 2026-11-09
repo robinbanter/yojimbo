@@ -142,7 +142,8 @@ function App() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      while (true) {
+      let finished = false;
+      while (!finished) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -156,6 +157,10 @@ function App() {
           if (type === 'message') setMessages((v) => [...v, { role: 'yojimbo', text: data.text }]);
           if (type === 'error') setMessages((v) => [...v, { role: 'error', text: data.message }]);
           if (type === 'tool' || type === 'tool_result') setTrace((v) => [{ type, ...data }, ...v].slice(0, 40));
+          if (type === 'done') {
+            finished = true;
+            void reader.cancel().catch(() => {});
+          }
         }
       }
     } catch (e) {
