@@ -1,11 +1,29 @@
 import { SuiJsonRpcClient, JsonRpcHTTPTransport } from '@mysten/sui/jsonRpc';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
-import { deepbook, mainnetPackageIds, mainnetCoins } from '@mysten/deepbook-v3';
+import { deepbook, mainnetPackageIds, mainnetCoins, mainnetPools } from '@mysten/deepbook-v3';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 export const POOL = 'SUI_USDC';
 export const USDC = mainnetCoins.USDC.type;
 export const MARGIN_REGISTRY = mainnetPackageIds.MARGIN_REGISTRY_ID;
+export const SUI_USDC_POOL = mainnetPools.SUI_USDC.address;
+const addressPattern = /^0x[0-9a-fA-F]{64}$/;
+export type RecentManager = {managerId:string;owner:string;pool:string;lastActivity:string;activity:string;checkpoint:string|null};
+type EventData = {eventType:string;json:Record<string,unknown>|null;checkpoint:string|null};
+export function parseManagerEvent(event:EventData): {managerId:string;lastActivity:string;activity:string;checkpoint:string|null}|null {
+  const activity=event.eventType.split('::').at(-1) ?? '';
+  if(!['MarginManagerCreatedEvent','LoanBorrowedEvent','DepositCollateralEvent','LiquidationEvent'].includes(activity))return null;
+  const id=event.json?.margin_manager_id, timestamp=Number(event.json?.timestamp);
+  if(typeof id!=='string'||!addressPattern.test(id)||!Number.isFinite(timestamp)||timestamp<=0)return null;
+  return {managerId:id.toLowerCase(),lastActivity:new Date(timestamp).toISOString(),activity,checkpoint:event.checkpoint};
+}
+export function parseManagerObject(object:{objectId:string;type?:string;json?:unknown},activity:{managerId:string;lastActivity:string;activity:string;checkpoint:string|null}):RecentManager|null {
+  const fields=object.json as Record<string,unknown>|undefined;
+  const owner=fields?.owner,pool=fields?.deepbook_pool;
+  if(object.objectId.toLowerCase()!==activity.managerId||!object.type?.includes('::margin_manager::MarginManager<')||typeof owner!=='string'||typeof pool!=='string'||!addressPattern.test(owner)||!addressPattern.test(pool))return null;
+  if(pool.toLowerCase()!==SUI_USDC_POOL.toLowerCase())return null;
+  return {...activity,owner:owner.toLowerCase(),pool:POOL};
+}
 export function botKey(env = process.env) { if (!env.YOJIMBO_BOT_KEY) throw new Error('Setup required: YOJIMBO_BOT_KEY'); return Ed25519Keypair.fromSecretKey(env.YOJIMBO_BOT_KEY); }
 export function rpc(env = process.env) {
   const dev = Boolean(env.YOJIMBO_DEV_SUI_RPC);
@@ -36,6 +54,39 @@ export async function position(owner: string, env = process.env) {
   const state = await c.client.deepbook.getMarginManagerState('BOT');
   const price = Number(state.basePythPrice) / 10**state.basePythDecimals;
   return {owner,managerId,state:{...state,currentPrice:state.currentPrice.toString(),lowestTriggerAbovePrice:state.lowestTriggerAbovePrice.toString(),highestTriggerBelowPrice:state.highestTriggerBelowPrice.toString()},price,source:c.source};
+}
+export async function watchPosition(managerId:string,env=process.env){
+  if(!addressPattern.test(managerId))throw new Error('Invalid MarginManager ID');
+  const base=rpc(env);
+  const result=await base.client.core.getObject({objectId:managerId,include:{json:true}});
+  const object=result.object;
+  const candidate=object&&parseManagerObject(object,{managerId:managerId.toLowerCase(),lastActivity:'',activity:'',checkpoint:null});
+  if(!candidate)throw new Error('SUI/USDC MarginManager not found');
+  const c=chain(candidate.owner,managerId,env);
+  const [state,thresholds]=await Promise.all([c.client.deepbook.getMarginManagerState('BOT'),registry(candidate.owner,env)]);
+  const price=Number(state.basePythPrice)/10**state.basePythDecimals;
+  const quotePrice=Number(state.quotePythPrice)/10**state.quotePythDecimals;
+  return {owner:candidate.owner,managerId,state:{...state,currentPrice:state.currentPrice.toString(),lowestTriggerAbovePrice:state.lowestTriggerAbovePrice.toString(),highestTriggerBelowPrice:state.highestTriggerBelowPrice.toString()},price,quotePrice,thresholds,source:c.source};
+}
+export async function discoverRecentManagers(limit=8,env=process.env):Promise<RecentManager[]>{
+  const c=rpc(env).client;
+  const registryObject=await c.core.getObject({objectId:MARGIN_REGISTRY});
+  const originalPackage=registryObject.object?.type?.split('::')[0];
+  if(!originalPackage||!addressPattern.test(originalPackage))throw new Error('Margin registry type unavailable');
+  const seen=new Map<string,RecentManager>();
+  let before:string|null|undefined;
+  for(let page=0;page<10&&seen.size<limit;page++){
+    const response=await c.core.listEvents({filter:{eventType:`${originalPackage}::margin_manager`},order:'descending',limit:50,...(before?{before}:{})});
+    const activities=new Map<string,NonNullable<ReturnType<typeof parseManagerEvent>>>();
+    for(const event of response.events){const item=parseManagerEvent(event);if(item&&!seen.has(item.managerId)&&!activities.has(item.managerId))activities.set(item.managerId,item);}
+    const candidates=await Promise.all([...activities.values()].map(async activity=>{
+      try{const result=await c.core.getObject({objectId:activity.managerId,include:{json:true}});return result.object?parseManagerObject(result.object,activity):null;}catch{return null;}
+    }));
+    for(const candidate of candidates)if(candidate)seen.set(candidate.managerId,candidate);
+    if(!response.hasNextPage||!response.endCursor||response.endCursor===before)break;
+    before=response.endCursor;
+  }
+  return [...seen.values()].sort((a,b)=>b.lastActivity.localeCompare(a.lastActivity)).slice(0,limit);
 }
 export type DefenceAction = 'deposit'|'reduce'|'repay';
 export function buildDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:{baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number},env=process.env) {
