@@ -12,7 +12,7 @@ try {
  if (!p.managerId || !p.state || !p.price) { console.log(JSON.stringify({test:'manager state and deposit dry-run',blocked:'funded bot-owned MarginManager'})); process.exit(0); }
  console.log(JSON.stringify({test:'manager state',ok:Number.isFinite(p.state.riskRatio),riskRatio:p.state.riskRatio,price:p.price}));
  const c=chain(owner,p.managerId);
- const {tx}=buildDefence(owner,p.managerId,'deposit',0.1,{baseAsset:p.state.baseAsset,baseDebt:p.state.baseDebt,quoteAsset:p.state.quoteAsset,quoteDebt:p.state.quoteDebt,price:p.price});
+ const {tx}=await buildDefence(owner,p.managerId,'deposit',0.1,{baseAsset:p.state.baseAsset,baseDebt:p.state.baseDebt,quoteAsset:p.state.quoteAsset,quoteDebt:p.state.quoteDebt,price:p.price});
  const dry=process.env.YOJIMBO_DEV_SUI_RPC ? await c.client.core.simulateTransaction({transaction:tx,include:{effects:true}}) : await (c.client as any).dryRunTransactionBlock({transactionBlock:await tx.build({client:c.client})});
  console.log(JSON.stringify({test:'deposit dry-run',status:'effects' in dry ? dry.effects?.status : dry.FailedTransaction?.status??'success'}));
 } catch(e) { console.error(JSON.stringify({test:'live',error:String(e)})); process.exitCode=1; }

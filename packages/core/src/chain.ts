@@ -97,16 +97,26 @@ export async function discoverRecentManagers(limit=8,env=process.env):Promise<Re
   }
   return [...seen.values()].sort((a,b)=>b.lastActivity.localeCompare(a.lastActivity)).slice(0,limit);
 }
+/** Floor a SUI order quantity to the pool's lot size; DeepBook aborts (order_info EOrderInvalidLotSize) otherwise. */
+export function toLots(quantity:number,lotSize:number,minSize:number){
+  if(!(lotSize>0))throw new Error('Invalid pool lot size');
+  const lots=Math.floor(quantity/lotSize+1e-9);
+  const rounded=Number((lots*lotSize).toFixed(9));
+  if(!(rounded>=minSize))throw new Error(`Order of ${quantity} SUI is below the pool minimum of ${minSize} SUI`);
+  return rounded;
+}
 export type DefenceAction = 'deposit'|'reduce'|'repay';
-export function buildDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:{baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number},env=process.env) {
+export async function buildDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:{baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number},env=process.env) {
   const c=chain(owner,managerId,env);
   const tx = new Transaction(); tx.setSender(owner);
   if (action === 'deposit') tx.add(c.client.deepbook.marginManager.depositQuote({managerKey:'BOT',amount:amountUsdc}));
   if (action === 'repay') tx.add(c.client.deepbook.marginManager.repayQuote('BOT',Math.min(amountUsdc,Number(state.quoteAsset),Number(state.quoteDebt))));
   if (action === 'reduce') {
     const isBid=Number(state.baseDebt)>0;
-    const quantity=Math.min((isBid?Number(state.baseDebt):Number(state.baseAsset))/2,amountUsdc/state.price);
-    if (!(quantity > 0)) throw new Error('No SUI position available to reduce');
+    const raw=Math.min((isBid?Number(state.baseDebt):Number(state.baseAsset))/2,amountUsdc/state.price);
+    if (!(raw > 0)) throw new Error('No SUI position available to reduce');
+    const book=await c.client.deepbook.poolBookParams(POOL);
+    const quantity=toLots(raw,book.lotSize,book.minSize);
     tx.add(c.client.deepbook.poolProxy.placeReduceOnlyMarketOrderAndRepayLoan({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid,payWithDeep:false}));
   }
   return {tx,client:c.client};
@@ -115,7 +125,7 @@ export async function executeDefence(owner:string,managerId:string,action:Defenc
   const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC ?? 10), daily=Number(env.YOJIMBO_DAILY_USDC ?? 30);
   if (![cap,daily,amountUsdc,spentToday].every(v=>Number.isFinite(v)&&v>=0) || cap<=0 || daily<=0 || amountUsdc<=0 || amountUsdc>cap || spentToday+amountUsdc>daily) throw new Error('Defence exceeds per-action or daily USDC cap');
   if (action==='repay' && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
-  const {tx,client}=buildDefence(owner,managerId,action,amountUsdc,state,env);
+  const {tx,client}=await buildDefence(owner,managerId,action,amountUsdc,state,env);
   if (env.YOJIMBO_DEV_SUI_RPC) {
     const simulated=await client.core.simulateTransaction({transaction:tx,include:{effects:true}});
     const status = simulated.FailedTransaction ? {status:'failure',error:simulated.FailedTransaction.status.error?.message ?? 'simulation failed'} : {status:'success'};
@@ -155,8 +165,10 @@ export async function openLong(owner:string,managerId:string,depositUsdc:number,
   const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC??10);
   if(!Number.isFinite(cap)||cap<=0||![depositUsdc,borrowUsdc,price].every(v=>Number.isFinite(v)&&v>0)||depositUsdc>cap||borrowUsdc>cap)throw new Error('Invalid amount or exceeds per-action USDC cap');
   const c=chain(owner,managerId,env);const tx=new Transaction();tx.setSender(owner);
+  const book=await c.client.deepbook.poolBookParams(POOL);
+  const quantity=toLots((depositUsdc+borrowUsdc)*0.9/price,book.lotSize,book.minSize);
   tx.add(c.client.deepbook.marginManager.depositQuote({managerKey:'BOT',amount:depositUsdc}));
   tx.add(c.client.deepbook.marginManager.borrowQuote('BOT',borrowUsdc));
-  tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity:(depositUsdc+borrowUsdc)*0.9/price,isBid:true,payWithDeep:false}));
+  tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid:true,payWithDeep:false}));
   return setupTransaction(owner,tx,env);
 }
