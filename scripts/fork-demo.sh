@@ -94,7 +94,7 @@ demo() {
   if python3 -c "import sys,json; d=json.loads('''$bot'''); sys.exit(0 if d['bot']['sui'] < 1 else 1)"; then
     "$TSX" "$REPO/scripts/hub-distribute.ts" --keys-file "$REPO/.env.fork" --to-keys-file "$REPO/.env.fork" --sui 3 --usdc 20
   else echo "bot already funded on the fork"; fi
-  "$TSX" "$REPO/scripts/fork-open.ts" --deposit 10 --borrow 5
+  "$TSX" "$REPO/scripts/fork-open.ts" --deposit "${FORK_DEPOSIT:-10}" --borrow "${FORK_BORROW:-5}"
   count() { python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$REPO/packages/server/data-fork/events.json" 2>/dev/null || echo 0; }
   n0=$(count)
   start_server
