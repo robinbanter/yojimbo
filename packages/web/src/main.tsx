@@ -491,7 +491,7 @@ function App() {
                         <span className="mono">{short(m.managerId)}</span>
                         <small>{ago(m.lastActivity)}</small>
                       </span>
-                      <span className={`risk r-${ratioTier(m.riskRatio, m.liquidationRatio)}`}>{m.riskRatio.toFixed(3)}</span>
+                      <span className={`risk r-${ratioTier(m.riskRatio, m.liquidationRatio)}`} title={m.riskRatio >= 1000 ? 'The chain reports its maximum risk ratio (1000) for this manager' : undefined}>{m.riskRatio >= 1000 ? '1000 · max' : m.riskRatio.toFixed(3)}</span>
                     </button>
                   ))}
                 </div>
