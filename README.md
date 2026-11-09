@@ -1,6 +1,82 @@
 # Yojimbo (用心棒)
 
+**A bodyguard for a borrowed-money trade while you sleep.** If you borrow to buy SUI and the price falls far enough, the exchange sells you out (liquidation), even at 3 a.m. You tell Yojimbo your rules in plain words, such as "while I sleep, add up to 5 USDC of collateral, never close". It watches the position, remembers your rules and schedule, acts only inside the caps you set, and adjusts its next decision when you correct it.
+
+Total Recall (Tatum × Walrus Memory), track **02 Smart Agents for Real Life**. Submission fields: [HACKATHON_SUBMISSION_FORM.md](HACKATHON_SUBMISSION_FORM.md). Blog post: [docs/BLOG.md](docs/BLOG.md).
+
 An AI bodyguard for a leveraged SUI/USDC DeepBook Margin position while its owner sleeps, flies, or works. It recalls the owner's schedule and rules, acts within hard limits, and changes its next decision after an owner override.
+
+## Status: live today vs pending keys
+
+| Piece | Today | What unblocks it |
+|---|---|---|
+| Tatum gRPC reads on Sui mainnet (registry, pool thresholds, MarginManager state, Pyth prices) | **Live.** `pnpm test:live` with `TATUM_API_KEY` reported `source: "Tatum"` on Nov 9 2026 (table below) | – |
+| Recent-manager event list | Live, but through the **public Sui fullnode**, because Tatum's gateway refuses `LedgerService/ListEvents` | – |
+| Watch mode, liquidation cushion, rule engine, dry-run refusal for positions Yojimbo does not own | Live, read-only | – |
+| Full lifecycle: fund, create manager, open, watcher defence, unwind | Proven on a **LOCAL FORK of Sui mainnet** only (real Move execution, fork-only keys, no real funds) | – |
+| Rules on the fork | From the local file `docs/fork-rules.json`, labelled `local-file:` in the app. **Not Walrus Memory** | – |
+| Walrus Memory writes and recalls on mainnet | **PENDING.** 0 memories on mainnet; the event requires at least 10 | Nick: Walrus Memory account ID (`MEMWAL_MAINNET_ACCOUNT_ID`) |
+| Mainnet transactions through Tatum (create, open, defence, unwind) | **PENDING.** None sent yet | Nick: hub funding (40 USDC + 2.5 SUI), then `YOJIMBO_BOT_KEY` funded from the hub (see the grokbot `MAINNET-RUNBOOK.md`) |
+| Chat agent | Works on a free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`). It hits rate limits, and a second answer took about 80 s in testing | Optional: OpenRouter credit |
+| Telegram alerts | Not set up (optional) | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` |
+| Public repo | **PENDING** | Nick makes the repo public |
+
+## Try it
+
+**Watch mode (Sui mainnet, read-only, no wallet needed).** Put `TATUM_API_KEY` in `.env`, then:
+
+```sh
+pnpm install
+pnpm dev            # http://localhost:5173, server on localhost:8787
+```
+
+Under **On guard**, choose **Watch a position**. Yojimbo lists recent SUI/USDC margin positions closest to liquidation first and shows how far SUI can fall before each one is liquidated. Without a Tatum key, `YOJIMBO_DEV_SUI_RPC=https://fullnode.mainnet.sui.io:443 pnpm dev` uses the public node and labels every read **dev RPC (not Tatum)**. Watch mode never submits a transaction.
+
+**Fork demo (a copy of Sui mainnet on your machine, no real funds).**
+
+```sh
+scripts/fork-demo.sh          # start a sui-fork, fund hub -> bot, open the position, run the server until it defends
+scripts/fork-demo.sh status   # fork checkpoint plus hub and bot balances
+scripts/fork-demo.sh stop
+```
+
+Open the UI against the fork with `cd packages/web && PORT=8796 VITE_PORT=5186 ./node_modules/.bin/vite --host 127.0.0.1`, then <http://127.0.0.1:5186>. A striped **LOCAL FORK** banner stays on screen. Details and every step: [docs/FORK.md](docs/FORK.md).
+
+## Proof
+
+### LOCAL FORK of Sui mainnet: fork-only digests
+
+These digests exist **only on a local fork** (`sui-fork` from `mainnet-v1.83.1`, run 3, forked at checkpoint 343353046). **They are not mainnet transactions and are not on Suiscan.** Rules came from `docs/fork-rules.json`, not Walrus Memory.
+
+| Step | Fork digest | Result |
+|---|---|---|
+| Fund: hub → bot, 3 SUI and 20 USDC | `J6xRzkV2FhRv789P3p84dMCJrzKj4f7AzCMhoWbWGdD2` | |
+| Open: `createMarginManager` | `BbtHKCR2URGzFww4PDVssAQEXWsr9Ab7w7BWQsQVVfsd` | manager `0xf984…8a02` |
+| Open: `openLong` (deposit 10, borrow 5, buy 16.2 SUI) | `2UWHSqSogL34NXqpjknm2SRHXG21Q5goYuMpFt22CCWp` | risk ratio 2.998967 |
+| Defence by the watcher: deposit 5 USDC (rule `fork-deposit-below-3.2`) | `CrdqKWvg6WD9LCEpLRbwpo1rBTMY4f9rTJzEKhWkDgM4` | **2.999 → 3.999** (2.998967 → 3.9989668) |
+| Unwind 1: sell 16.0 SUI, repay 5.000001 USDC | `2EL9xJXp9sG3M1SxL4WJ3k2HAcjDD5D71mFAwKJH82yB` | no debt left |
+| Unwind 2: withdraw to the bot | `AQ8emCmYtpgRN8ftTNjw7XzuRPfkrj7CPt3Br1WyGetA` | manager empty |
+| Unwind 3: return to the hub | `EE8XuY2RcsdMgSFSC37rAxnDbMoVAzyWjwZpd9nwwgCw` | 19.824842 of 20 USDC back |
+
+Runs 1 and 2 (open and defence on separate forks) are in [docs/FORK.md](docs/FORK.md).
+
+### Sui mainnet, watch mode (read-only)
+
+| Read | Transport | Observed |
+|---|---|---|
+| `pnpm test:live`, Nov 9 2026 13:08 UTC: margin registry | **Tatum gRPC** (`source: "Tatum"`) | SUI/USDC enabled, margin package v8 `0x40fa…625f`, liquidation 1.1, minimum borrow 1.2499, minimum withdraw 2 |
+| Same run: 5 recent SUI/USDC MarginManagers | State via **Tatum gRPC**; the event list via the public fullnode | live risk ratios 1000, 1.286, 2.499, 1.185, 1.311 |
+| Same run: bot manager state and deposit dry-run | – | blocked: `YOJIMBO_BOT_KEY` not set |
+| Round-2 watch pass ([TESTING.md](TESTING.md)) | public fullnode, labelled **dev RPC (not Tatum)** | 12 managers in 3.35 s; manager `0x7426…4593` at ratio 1.131, about 1.8% above liquidation |
+
+No mainnet transaction digest exists yet. Mainnet Suiscan links will be added here after the funded run.
+
+## Films (not public yet)
+
+- `videos/yojimbo/yojimbo-fork-film-v1.mp4` (1:52): fund, open and defence on the LOCAL FORK, with a fork badge in every shot. Link: **PENDING upload**.
+- `yojimbo-film-v3.mp4` (1:41): mainnet watch mode, the chat agent, and the phone layout. Its reads use the public Sui node and say so on screen; Walrus Memory shows **Setup required**. Link: **PENDING upload**.
+
+Both live in the grokbot `videos/yojimbo/` folder, not in this repo.
 
 ## Custody and chain version
 
@@ -47,6 +123,13 @@ Chat uses OpenRouter tool calls (default model `nvidia/nemotron-3-ultra-550b-a55
 
 See [TESTING.md](TESTING.md) for observed results and [BLOCKED.md](BLOCKED.md) for remaining setup.
 
-## Art
+## AI and art disclosure
 
-Art generated with ChatGPT (image generation), directed in [docs/ART.md](docs/ART.md); source PNGs are not committed, the web app ships WebP copies in `packages/web/public/art/`.
+- **Code:** written with AI coding agents, Claude (Anthropic) and Codex (OpenAI), directed and reviewed by Nick.
+- **Art:** generated with ChatGPT image generation, directed in [docs/ART.md](docs/ART.md). Source PNGs are not committed; the web app ships WebP copies in `packages/web/public/art/`.
+- **Film voice:** synthetic voice-over made with Chatterbox text-to-speech. The screen recordings show the real app; program output is not edited.
+- **In the product:** the chat agent runs on a free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free` by default). The model writes messages and parses intent. It does not choose defence actions; the deterministic rule engine in `packages/core/src/policy.ts` does.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
