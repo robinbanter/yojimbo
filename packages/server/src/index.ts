@@ -104,8 +104,8 @@ const toolSchemas=[
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties,additionalProperties:false}}}));
 async function openRouter(messages:any[],tools:any[]=toolSchemas){
  if(!process.env.OPENROUTER_API_KEY)throw new Error('Setup required: OPENROUTER_API_KEY');
- const response=await fetch('https://openrouter.ai/api/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:`Bearer ${process.env.OPENROUTER_API_KEY}`},body:JSON.stringify({model:process.env.YOJIMBO_MODEL||'openai/gpt-4.1-mini',messages,tools,tool_choice:'auto'})});
- if(!response.ok)throw new Error(`OpenRouter HTTP ${response.status}`);
+ const response=await fetch('https://openrouter.ai/api/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:`Bearer ${process.env.OPENROUTER_API_KEY}`},body:JSON.stringify({model:process.env.YOJIMBO_MODEL||'nvidia/nemotron-3-ultra-550b-a55b:free',messages,tools,tool_choice:'auto'})});
+ if(!response.ok)throw new Error((response.status===402?'OpenRouter HTTP 402: this key has no credits left. Top up OpenRouter or set YOJIMBO_MODEL to a :free model':response.status===429?'OpenRouter HTTP 429: the free model is rate-limited right now. Try again in a minute':`OpenRouter HTTP ${response.status}`));
  return (await response.json()).choices[0].message;
 }
 async function chat(res:ServerResponse,prompt:string,watchManagerId?:string){
@@ -113,7 +113,7 @@ async function chat(res:ServerResponse,prompt:string,watchManagerId?:string){
  const send=(type:string,data:unknown)=>res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
  try{
   const address=process.env.YOJIMBO_BOT_KEY?owner():'0x1';
-  const messages:any[]=[{role:'system',content:`You are Yojimbo, a cautious Sui DeepBook margin bodyguard. Use tools for every factual position or memory claim. Never invent chain or memory data or remembered rules. Defence decisions are deterministic. If a memory tool returns Setup required: Walrus Memory, say that clearly and do not claim to remember. Watched positions are read-only and Yojimbo cannot act on someone else's position. ${watchManagerId?`Current watched manager ID: ${watchManagerId}. Use watch_position or get_risk with this managerId for risk questions.`:''} State clearly that actions are dry-run unless mainnet is enabled. One-time schedule start/end are YYYY-MM-DDTHH:MM local. Do not claim success on a failed dry-run.`},{role:'user',content:prompt}];
+  const messages:any[]=[{role:'system',content:`You are Yojimbo, a cautious Sui DeepBook margin bodyguard. Use tools for every factual position or memory claim. Never invent chain or memory data or remembered rules. Defence decisions are deterministic. If a memory tool returns Setup required: Walrus Memory, say that clearly and do not claim to remember. Watched positions are read-only and Yojimbo cannot act on someone else's position. Reply in plain text for a chat bubble: no markdown, no headings, no bullet lists, at most four short sentences, and quote numbers exactly as the tools returned them. ${watchManagerId?`Current watched manager ID: ${watchManagerId}. Use watch_position or get_risk with this managerId for risk questions.`:''} State clearly that actions are dry-run unless mainnet is enabled. One-time schedule start/end are YYYY-MM-DDTHH:MM local. Do not claim success on a failed dry-run.`},{role:'user',content:prompt}];
   for(let i=0;i<8;i++){
    const reply=await openRouter(messages,watchManagerId?toolSchemas.filter(t=>['get_risk','watch_position','list_recent_managers','list_rules','add_rule','add_schedule','record_override'].includes(String(t.function.name))):toolSchemas);messages.push(reply);
    if(!reply.tool_calls?.length){send('message',{text:reply.content||''});send('done',{});return;}
