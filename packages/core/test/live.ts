@@ -1,8 +1,12 @@
-import { chain, registry, position, botKey, buildDefence } from '../src/index.js';
+import { chain, registry, position, botKey, buildDefence, discoverRecentManagers, watchPosition } from '../src/index.js';
 const owner=process.env.YOJIMBO_BOT_KEY ? botKey().toSuiAddress() : '0x0000000000000000000000000000000000000000000000000000000000000001';
 try {
  const r=await registry(owner);
  console.log(JSON.stringify({test:'registry',ok:r.enabled && r.liquidation>1 && r.minBorrow>r.liquidation,source:r.source,packageId:r.packageId,liquidation:r.liquidation,minBorrow:r.minBorrow,minWithdraw:r.minWithdraw,basePool:r.basePool,quotePool:r.quotePool}));
+ const managers=await discoverRecentManagers(5);
+ const live=await Promise.all(managers.map(async m=>({managerId:m.managerId,riskRatio:(await watchPosition(m.managerId)).state.riskRatio})));
+ if(live.length<3||live.some(m=>!Number.isFinite(m.riskRatio)))throw new Error('Fewer than three recent managers with live risk ratios');
+ console.log(JSON.stringify({test:'recent managers',ok:true,count:live.length,positions:live}));
  if (!process.env.YOJIMBO_BOT_KEY) { console.log(JSON.stringify({test:'manager state and deposit dry-run',blocked:'YOJIMBO_BOT_KEY'})); process.exit(0); }
  const p=await position(owner);
  if (!p.managerId || !p.state || !p.price) { console.log(JSON.stringify({test:'manager state and deposit dry-run',blocked:'funded bot-owned MarginManager'})); process.exit(0); }

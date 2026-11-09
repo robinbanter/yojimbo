@@ -24,6 +24,12 @@ export function parseManagerObject(object:{objectId:string;type?:string;json?:un
   if(pool.toLowerCase()!==SUI_USDC_POOL.toLowerCase())return null;
   return {...activity,owner:owner.toLowerCase(),pool:POOL};
 }
+export function parseManagerState<T extends {riskRatio:number;basePythPrice:string;basePythDecimals:number;quotePythPrice:string;quotePythDecimals:number;currentPrice:bigint|string;lowestTriggerAbovePrice:bigint|string;highestTriggerBelowPrice:bigint|string}>(state:T){
+  const price=Number(state.basePythPrice)/10**state.basePythDecimals;
+  const quotePrice=Number(state.quotePythPrice)/10**state.quotePythDecimals;
+  if(!Number.isFinite(state.riskRatio)||!Number.isFinite(price)||price<=0||!Number.isFinite(quotePrice)||quotePrice<=0)throw new Error('Invalid live MarginManager state');
+  return {state:{...state,currentPrice:state.currentPrice.toString(),lowestTriggerAbovePrice:state.lowestTriggerAbovePrice.toString(),highestTriggerBelowPrice:state.highestTriggerBelowPrice.toString()},price,quotePrice};
+}
 export function botKey(env = process.env) { if (!env.YOJIMBO_BOT_KEY) throw new Error('Setup required: YOJIMBO_BOT_KEY'); return Ed25519Keypair.fromSecretKey(env.YOJIMBO_BOT_KEY); }
 export function rpc(env = process.env) {
   const dev = Boolean(env.YOJIMBO_DEV_SUI_RPC);
@@ -52,8 +58,8 @@ export async function position(owner: string, env = process.env) {
   if (!managerId) return {owner,managerId:null,state:null,price:null,source:base.source};
   const c=chain(owner,managerId,env);
   const state = await c.client.deepbook.getMarginManagerState('BOT');
-  const price = Number(state.basePythPrice) / 10**state.basePythDecimals;
-  return {owner,managerId,state:{...state,currentPrice:state.currentPrice.toString(),lowestTriggerAbovePrice:state.lowestTriggerAbovePrice.toString(),highestTriggerBelowPrice:state.highestTriggerBelowPrice.toString()},price,source:c.source};
+  const parsed=parseManagerState(state);
+  return {owner,managerId,state:parsed.state,price:parsed.price,source:c.source};
 }
 export async function watchPosition(managerId:string,env=process.env){
   if(!addressPattern.test(managerId))throw new Error('Invalid MarginManager ID');
@@ -64,9 +70,8 @@ export async function watchPosition(managerId:string,env=process.env){
   if(!candidate)throw new Error('SUI/USDC MarginManager not found');
   const c=chain(candidate.owner,managerId,env);
   const [state,thresholds]=await Promise.all([c.client.deepbook.getMarginManagerState('BOT'),registry(candidate.owner,env)]);
-  const price=Number(state.basePythPrice)/10**state.basePythDecimals;
-  const quotePrice=Number(state.quotePythPrice)/10**state.quotePythDecimals;
-  return {owner:candidate.owner,managerId,state:{...state,currentPrice:state.currentPrice.toString(),lowestTriggerAbovePrice:state.lowestTriggerAbovePrice.toString(),highestTriggerBelowPrice:state.highestTriggerBelowPrice.toString()},price,quotePrice,thresholds,source:c.source};
+  const parsed=parseManagerState(state);
+  return {owner:candidate.owner,managerId,state:parsed.state,price:parsed.price,quotePrice:parsed.quotePrice,thresholds,source:c.source};
 }
 export async function discoverRecentManagers(limit=8,env=process.env):Promise<RecentManager[]>{
   const c=rpc(env).client;

@@ -1,0 +1,52 @@
+{
+  "registryType": "0x97d9473771b01f77b0940c589484184b49f6444627ec121314fae6a6d36fb86b::margin_registry::MarginRegistry",
+  "events": [
+    {
+      "eventType": "0x97d9473771b01f77b0940c589484184b49f6444627ec121314fae6a6d36fb86b::margin_manager::LoanBorrowedEvent",
+      "json": {
+        "loan_amount": "39585353",
+        "loan_shares": "37602945",
+        "margin_manager_id": "0xc3d06e3681fe1a0c18731f3fcff3476f371a06317d7e192a6bacabf91bcb6045",
+        "margin_pool_id": "0xba473d9ae278f10af75c50a8fa341e9c6a1c087dc91a3f23e8048baf67d0754f",
+        "timestamp": "1794182409027"
+      },
+      "checkpoint": "343173106"
+    },
+    {
+      "eventType": "0x97d9473771b01f77b0940c589484184b49f6444627ec121314fae6a6d36fb86b::margin_manager::DepositCollateralEvent",
+      "json": {
+        "amount": "11517868389",
+        "asset": "0000000000000000000000000000000000000000000000000000000000000002::sui::SUI",
+        "margin_manager_id": "0xc3d06e3681fe1a0c18731f3fcff3476f371a06317d7e192a6bacabf91bcb6045",
+        "pyth_decimals": 8,
+        "pyth_price": "82004585",
+        "timestamp": "1794182409027"
+      },
+      "checkpoint": "343173106"
+    }
+  ],
+  "object": {
+    "objectId": "0xc3d06e3681fe1a0c18731f3fcff3476f371a06317d7e192a6bacabf91bcb6045",
+    "type": "0x97d9473771b01f77b0940c589484184b49f6444627ec121314fae6a6d36fb86b::margin_manager::MarginManager<0x0000000000000000000000000000000000000000000000000000000000000002::sui::SUI,0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC>",
+    "json": {
+      "owner": "0xd74a7ee6c5d4a9cabd34608705d5923c8f85524f69c661ea571b1f79259f09b4",
+      "deepbook_pool": "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407"
+    }
+  },
+  "state": {
+    "managerId": "0xc3d06e3681fe1a0c18731f3fcff3476f371a06317d7e192a6bacabf91bcb6045",
+    "deepbookPoolId": "0xe05dafb5133bcffb8d59f4e12465dc0e9faeaa05e3e342a08fe135800e3e4407",
+    "riskRatio": 1.244541698,
+    "baseAsset": "60.217868",
+    "quoteAsset": "0.049494",
+    "baseDebt": "0",
+    "quoteDebt": "39.587727",
+    "basePythPrice": "81715958",
+    "basePythDecimals": 8,
+    "quotePythPrice": "99976687",
+    "quotePythDecimals": 8,
+    "currentPrice": "817350",
+    "lowestTriggerAbovePrice": "18446744073709551615",
+    "highestTriggerBelowPrice": "790000"
+  }
+}
