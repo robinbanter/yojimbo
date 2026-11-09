@@ -3,6 +3,8 @@ import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { deepbook, mainnetPackageIds, mainnetCoins, mainnetPools } from '@mysten/deepbook-v3';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
+import { bcs } from '@mysten/sui/bcs';
+import { FORK_SOURCE, FORK_WRITE_GATE, executeOnFork, forkClient, forkUrl } from './fork.js';
 export const POOL = 'SUI_USDC';
 export const USDC = mainnetCoins.USDC.type;
 export const MARGIN_REGISTRY = mainnetPackageIds.MARGIN_REGISTRY_ID;
@@ -32,6 +34,8 @@ export function parseManagerState<T extends {riskRatio:number;basePythPrice:stri
 }
 export function botKey(env = process.env) { if (!env.YOJIMBO_BOT_KEY) throw new Error('Setup required: YOJIMBO_BOT_KEY'); return Ed25519Keypair.fromSecretKey(env.YOJIMBO_BOT_KEY); }
 export function rpc(env = process.env) {
+  const fork = forkUrl(env);
+  if (fork) return {client:forkClient(fork), source:FORK_SOURCE, url:fork};
   const dev = Boolean(env.YOJIMBO_DEV_SUI_RPC);
   if (!dev && !env.TATUM_API_KEY) throw new Error('Setup required: TATUM_API_KEY');
   const url = dev ? env.YOJIMBO_DEV_SUI_RPC! : 'https://sui-mainnet.gateway.tatum.io';
@@ -41,7 +45,7 @@ export function rpc(env = process.env) {
 export function chain(owner: string, managerId?: string, env = process.env) {
   const r = rpc(env);
   const options = {address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey:POOL}} : undefined};
-  if (r.source === 'dev RPC (not Tatum)') return {...r,client:r.client.$extend(deepbook(options))};
+  if (r.source === 'dev RPC (not Tatum)' || r.source === FORK_SOURCE) return {...r,client:r.client.$extend(deepbook(options))};
   return {...r,client:r.client.$extend(deepbook(options))};
 }
 export async function registry(owner: string, env = process.env) {
@@ -61,11 +65,14 @@ export async function position(owner: string, env = process.env) {
   const parsed=parseManagerState(state);
   return {owner,managerId,state:parsed.state,price:parsed.price,source:c.source};
 }
+/** sui-fork's gRPC serves object BCS but no JSON; MarginManager starts with id, owner and deepbook_pool. */
+const ManagerPrefix=bcs.struct('MarginManagerPrefix',{id:bcs.Address,owner:bcs.Address,deepbook_pool:bcs.Address});
+function managerPrefix(content?:Uint8Array|null){if(!content||content.length<96)return undefined;try{return ManagerPrefix.parse(content.slice(0,96));}catch{return undefined;}}
 export async function managerState(managerId:string,env=process.env){
   if(!addressPattern.test(managerId))throw new Error('Invalid MarginManager ID');
   const base=rpc(env);
-  const result=await base.client.core.getObject({objectId:managerId,include:{json:true}});
-  const object=result.object;
+  const result=await base.client.core.getObject({objectId:managerId,include:{json:true,content:true}});
+  const object=result.object&&{...result.object,json:result.object.json??managerPrefix(result.object.content)};
   const candidate=object&&parseManagerObject(object,{managerId:managerId.toLowerCase(),lastActivity:'',activity:'',checkpoint:null});
   if(!candidate)throw new Error('SUI/USDC MarginManager not found');
   const c=chain(candidate.owner,managerId,env);
@@ -97,6 +104,15 @@ export async function discoverRecentManagers(limit=8,env=process.env):Promise<Re
   }
   return [...seen.values()].sort((a,b)=>b.lastActivity.localeCompare(a.lastActivity)).slice(0,limit);
 }
+/** Local fork writes: simulate first, then send only with YOJIMBO_ALLOW_FORK_WRITES=LOCAL_FORK_ONLY. Never reaches mainnet. */
+async function forkWrite(owner:string,tx:Transaction,client:SuiGrpcClient,env=process.env){
+  let status:{status:string;error?:string};
+  try{const simulated=await client.core.simulateTransaction({transaction:tx,include:{effects:true}});status=simulated.FailedTransaction?{status:'failure',error:simulated.FailedTransaction.status.error?.message??'simulation failed'}:{status:'success'};}
+  catch(e){status={status:'failure',error:`fork simulation unavailable: ${String(e).slice(0,200)}`};}
+  if(env.YOJIMBO_ALLOW_FORK_WRITES!==FORK_WRITE_GATE)return {mode:'dry-run' as const,status,txDigest:null};
+  if(owner!==botKey(env).toSuiAddress())throw new Error('Bot wallet does not own this manager');
+  return executeOnFork(client,tx,{signer:botKey(env)});
+}
 /** Floor a SUI order quantity to the pool's lot size; DeepBook aborts (order_info EOrderInvalidLotSize) otherwise. */
 export function toLots(quantity:number,lotSize:number,minSize:number){
   if(!(lotSize>0))throw new Error('Invalid pool lot size');
@@ -126,6 +142,7 @@ export async function executeDefence(owner:string,managerId:string,action:Defenc
   if (![cap,daily,amountUsdc,spentToday].every(v=>Number.isFinite(v)&&v>=0) || cap<=0 || daily<=0 || amountUsdc<=0 || amountUsdc>cap || spentToday+amountUsdc>daily) throw new Error('Defence exceeds per-action or daily USDC cap');
   if (action==='repay' && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
   const {tx,client}=await buildDefence(owner,managerId,action,amountUsdc,state,env);
+  if (forkUrl(env)) return forkWrite(owner,tx,client as SuiGrpcClient,env);
   if (env.YOJIMBO_DEV_SUI_RPC) {
     const simulated=await client.core.simulateTransaction({transaction:tx,include:{effects:true}});
     const status = simulated.FailedTransaction ? {status:'failure',error:simulated.FailedTransaction.status.error?.message ?? 'simulation failed'} : {status:'success'};
@@ -143,6 +160,7 @@ export async function executeDefence(owner:string,managerId:string,action:Defenc
 }
 export async function setupTransaction(owner:string,tx:Transaction,env=process.env){
   const c=chain(owner,undefined,env);
+  if(forkUrl(env))return forkWrite(owner,tx,c.client as SuiGrpcClient,env);
   if(env.YOJIMBO_DEV_SUI_RPC){
     const simulation=await c.client.core.simulateTransaction({transaction:tx,include:{effects:true}});
     const status=simulation.FailedTransaction ? {status:'failure',error:simulation.FailedTransaction.status.error?.message??'simulation failed'} : {status:'success'};
