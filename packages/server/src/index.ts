@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { POOL, live, cleanRule, liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, unwindPosition, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
+import { POOL, live, cleanRule, liquidationCushion, liquidationPrice, markets, positions, openShort, assertPoolKey, botKey, chain, executeDefence, createMarginManager, openLong, unwindPosition, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
 
 const port=Number(process.env.PORT ?? 8787);
 // Fork runs keep their own event log (YOJIMBO_DATA_DIR) so fork digests never mix with mainnet history.
@@ -40,21 +40,24 @@ async function recentManagers(){
 }
 async function recentWithRisk(){
  const items=await recentManagers();
- const thresholds=await registry('0x1');
- const live=await Promise.all(items.map(async item=>{try{const p=await managerState(item.managerId);return {...item,riskRatio:p.state.riskRatio,liquidationRatio:thresholds.liquidation};}catch{return null;}}));
+ const live=await Promise.all(items.map(async item=>{try{const thresholds=await registry('0x1',process.env,item.pool);const p=await managerState(item.managerId);return {...item,side:p.side,riskRatio:p.state.riskRatio,liquidationRatio:thresholds.liquidation};}catch{return null;}}));
  return live.filter((item):item is NonNullable<typeof item>=>item!==null).sort((a,b)=>a.riskRatio-a.liquidationRatio-(b.riskRatio-b.liquidationRatio));
 }
 function memoryReady(){return Boolean(process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID);}
-type EventRow={id:string;at:string;beforeRatio:number;afterRatio:number|null;suiPrice:number;movePercent:number;mode:string;action:Action;amountUsdc:number;outcome:string;txDigest:string|null;ruleIds:string[];recalledBlobIds:string[];memoryBlobId?:string;memoryError?:string};
+type EventRow={id:string;at:string;pool?:string;side?:string;managerId?:string;beforeRatio:number;afterRatio:number|null;suiPrice:number;movePercent:number;mode:string;action:Action;amountUsdc:number;outcome:string;txDigest:string|null;ruleIds:string[];recalledBlobIds:string[];memoryBlobId?:string;memoryError?:string};
 let events:EventRow[]=[];
 try { events=JSON.parse(await readFile(dataFile,'utf8')); } catch {}
 const listeners=new Set<ServerResponse>();
-const pending=new Map<string,{decision:Decision;context:Context;owner:string;managerId:string;state:any;timer:ReturnType<typeof setTimeout>}>();
+type Meta={pool:string;side:string};
+const pending=new Map<string,{decision:Decision;context:Context;owner:string;managerId:string;state:any;meta:Meta;timer:ReturnType<typeof setTimeout>}>();
 let watcherError:string|null=null;
 // When the 15-second watcher last ran, so the page can show a real heartbeat.
 let lastCheckAt:string|null=null;
 let lastPrice:number|null=null;
 let lastActionAt=0;
+// Per-position watcher memory: last price seen and last action time, keyed by MarginManager ID.
+const lastPriceBy=new Map<string,number>();
+const lastActionBy=new Map<string,number>();
 let telegramOffset=0;
 let lastSummaryDate=new Date().toISOString().slice(0,10);
 function owner(){return botKey().toSuiAddress();}
@@ -69,23 +72,31 @@ async function recall(ownerAddress:string,ctx:Context){if(memoryReady())return m
 async function snapshot(ownerAddress:string){const p=await position(ownerAddress);if(!p.state||!p.price||!p.managerId)throw new Error('Setup required: bot-owned MarginManager');return p;}
 async function context(ownerAddress:string){const p=await snapshot(ownerAddress);return {p,ctx:{at:new Date(),ratio:p.state!.riskRatio,movePercent:lastPrice ? (p.price!-lastPrice)/lastPrice*100 : 0,suiPrice:p.price!}};}
 function spentToday(){const day=new Date().toISOString().slice(0,10);return events.filter(e=>e.at.startsWith(day)&&e.outcome===(fork?'fork success':'mainnet success')).reduce((n,e)=>n+e.amountUsdc,0);}
-async function assess(ownerAddress:string){const {p,ctx}=await context(ownerAddress);const hits=await recall(ownerAddress,ctx);const decision=decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5));return {p,ctx,hits,decision};}
+async function assess(ownerAddress:string){const {p,ctx}=await context(ownerAddress);const hits=await recall(ownerAddress,ctx);const decision=decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5));return {p,ctx,hits,decision,meta:{pool:p.pool??POOL,side:Number(p.state!.baseDebt)>0?'short':Number(p.state!.quoteDebt)>0?'long':'none'} as Meta};}
+/** One bot position on its own pool: live state, the deterministic decision, and where liquidation sits. */
+async function assessPosition(ownerAddress:string,item:Awaited<ReturnType<typeof positions>>['positions'][number]){
+ const prev=lastPriceBy.get(item.managerId);
+ const ctx:Context={at:new Date(),ratio:item.state.riskRatio,movePercent:prev?(item.price-prev)/prev*100:0,suiPrice:item.price};
+ const hits=await recall(ownerAddress,ctx);
+ const decision=decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5));
+ return {ctx,decision,meta:{pool:item.pool,side:item.side} as Meta};
+}
 async function assessWatched(managerId:string){const p=await watchPosition(managerId);const ctx:Context={at:new Date(),ratio:p.state.riskRatio,movePercent:0,suiPrice:p.price};const hits=await recall(p.owner,ctx);const cushion=p.thresholds?.liquidation==null?null:liquidationCushion({baseAsset:Number(p.state.baseAsset),quoteAsset:Number(p.state.quoteAsset),baseDebt:Number(p.state.baseDebt),quoteDebt:Number(p.state.quoteDebt),price:Number(p.price),quotePrice:Number(p.quotePrice),riskRatio:Number(p.state.riskRatio)},Number(p.thresholds.liquidation));return {...p,checkedAt:new Date().toISOString(),liquidation:cushion?{suiPriceAtLiquidationUsd:Number(cushion.price.toFixed(4)),suiMoveToLiquidationPercent:Number((cushion.move*100).toFixed(2)),alreadyLiquidatable:cushion.atOrBelow}:'no SUI price move alone liquidates this position',decision:decide(hits,ctx,Number(process.env.YOJIMBO_ALERT_RATIO??1.5)),decisionSource:memoryReady()?'Walrus Memory':fork&&process.env.YOJIMBO_FORK_RULES?`local fork rules file ${process.env.YOJIMBO_FORK_RULES} (not Walrus Memory)`:'defaults: no remembered rules (Walrus Memory setup required)',context:{at:ctx.at.toISOString(),movePercent:ctx.movePercent},caps:{perActionUsdc:Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10),dailyUsdc:Number(process.env.YOJIMBO_DAILY_USDC??30)}};}
 async function remember(ownerAddress:string,memory:Memory){const blobId=await memoryOf(ownerAddress).remember(memory);emit('memory',{blobId,memory});return blobId;}
-async function act(ownerAddress:string,decision:Decision,ctx:Context,managerId:string,state:any,forceDryRun=false){
+async function act(ownerAddress:string,decision:Decision,ctx:Context,managerId:string,state:any,forceDryRun=false,meta?:Meta){
  if(decision.action==='ignore')return {outcome:'ignored',decision};
  const amount=Math.min(decision.amountUsdc,Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10));
  const env=forceDryRun?{...process.env,YOJIMBO_ALLOW_MAINNET:'',YOJIMBO_ALLOW_FORK_WRITES:''}:process.env;
- const result=await executeDefence(ownerAddress,managerId,decision.action,amount,{baseAsset:state.baseAsset,baseDebt:state.baseDebt,quoteAsset:state.quoteAsset,quoteDebt:state.quoteDebt,price:ctx.suiPrice},spentToday(),env);
+ const result=await executeDefence(ownerAddress,managerId,decision.action,amount,{baseAsset:state.baseAsset,baseDebt:state.baseDebt,quoteAsset:state.quoteAsset,quoteDebt:state.quoteDebt,price:ctx.suiPrice,pool:meta?.pool},spentToday(),env);
  let afterRatio:null|number=null;
- if(result.mode==='mainnet'||result.mode==='fork'){try{afterRatio=(await snapshot(ownerAddress)).state!.riskRatio;}catch{}}
+ if(result.mode==='mainnet'||result.mode==='fork'){try{afterRatio=(await managerState(managerId)).state.riskRatio;}catch{}}
  const outcome=(result.mode==='mainnet'||result.mode==='fork')&&result.status?.status==='success'?`${result.mode} success`:`${result.mode} ${result.status?.status??'unknown'}`;
- const row:EventRow={id:memoryId(),at:ctx.at.toISOString(),beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,amountUsdc:amount,outcome,txDigest:result.txDigest,ruleIds:decision.ruleIds,recalledBlobIds:decision.recalledBlobIds};
+ const row:EventRow={id:memoryId(),at:ctx.at.toISOString(),pool:meta?.pool,side:meta?.side,managerId,beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,amountUsdc:amount,outcome,txDigest:result.txDigest,ruleIds:decision.ruleIds,recalledBlobIds:decision.recalledBlobIds};
  events.unshift(row);await persist();emit('event',row);
- const memory:Memory={version:'YOJIMBO_V1',kind:'event',id:row.id,createdAt:row.at,text:`${decision.action}: ${outcome}. ${decision.quote}`,beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,txDigest:result.txDigest,outcome,ruleIds:decision.ruleIds};
+ const memory:Memory={version:'YOJIMBO_V1',kind:'event',id:row.id,createdAt:row.at,text:`${meta?`${meta.pool} ${meta.side}: `:''}${decision.action}: ${outcome}. ${decision.quote}`,beforeRatio:ctx.ratio,afterRatio,suiPrice:ctx.suiPrice,movePercent:ctx.movePercent,mode:decision.mode,action:decision.action,txDigest:result.txDigest,outcome,ruleIds:decision.ruleIds};
  try{row.memoryBlobId=await remember(ownerAddress,memory);await persist();}catch(e){row.memoryError=safeError(e);await persist();}
  const txLink=!result.txDigest?'':result.mode==='fork'?` digest ${result.txDigest} (${FORK_SOURCE} @ checkpoint ${result.fork.forkedAtCheckpoint}, not on Suiscan)`:` https://suiscan.xyz/mainnet/tx/${result.txDigest}`;
- await notify(`Yojimbo ${outcome}: ${decision.action} ${amount} USDC at risk ratio ${ctx.ratio.toFixed(3)}. “${decision.quote}”${txLink}`);
+ await notify(`Yojimbo ${outcome}${meta?` on ${meta.pool} ${meta.side}`:''}: ${decision.action} ${amount} USDC at risk ratio ${ctx.ratio.toFixed(3)}. “${decision.quote}”${txLink}`);
  return {outcome,decision,event:row};
 }
 async function recordOverride(ownerAddress:string,args:any){
@@ -101,7 +112,7 @@ async function tool(name:string,args:any,ownerAddress:string){
  if(name==='watch_position')return assessWatched(String(args.managerId));
  if(name==='list_recent_managers')return {managers:await recentWithRisk()};
  if(name==='create_margin_manager'){const existing=await position(ownerAddress);if(existing.managerId)throw new Error('Bot already has a MarginManager');return createMarginManager(ownerAddress);}
- if(name==='open_position'){const p=await snapshot(ownerAddress);if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)throw new Error('Position already has debt');return openLong(ownerAddress,p.managerId!,Number(args.depositUsdc),Number(args.borrowUsdc),p.price!);}
+ if(name==='open_position'){const p=await snapshot(ownerAddress);if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)throw new Error('Position already has debt');return openLong(ownerAddress,p.managerId!,Number(args.depositUsdc),Number(args.borrowUsdc),p.price!,process.env,p.pool);}
  if(name==='list_rules'){if(!memoryReady())return {error:'Setup required: Walrus Memory'};const hits=await memoryOf(ownerAddress).recallQuery('Yojimbo all schedules rules overrides and owner preferences');return {items:live(hits).filter(h=>['rule','schedule','override'].includes(h.memory.kind)),forgotten:hits.filter(h=>h.memory.kind==='retire').map(h=>h.memory),recalled:hits.map(h=>h.blobId)};}
  if(['add_rule','add_schedule','record_override','forget_memories'].includes(name)&&!memoryReady())return {error:'Setup required: Walrus Memory'};
  if(name==='add_rule'){
@@ -129,11 +140,23 @@ async function tool(name:string,args:any,ownerAddress:string){
   const memory:Memory={version:'YOJIMBO_V1',kind:'retire',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text||'Owner asked to forget these'),ids};return {blobId:await remember(ownerAddress,memory),memory};
  }
  if(name==='simulate_defence'||name==='defend'){
-  const {p,ctx,decision}=await assess(ownerAddress);
-  emit('trace',{decision,recalled:decision.recalledBlobIds});
-  return act(ownerAddress,decision,ctx,p.managerId!,p.state!,name==='simulate_defence');
+  const {p,ctx,decision,meta}=await assess(ownerAddress);
+  emit('trace',{decision,recalled:decision.recalledBlobIds,managerId:p.managerId,...meta});
+  return act(ownerAddress,decision,ctx,p.managerId!,p.state!,name==='simulate_defence',meta);
  }
  throw new Error(`Unknown tool ${name}`);
+}
+const INDEXER='https://deepbook-indexer.mainnet.mystenlabs.com';
+async function history(pool:string,interval:string,limit:number){
+ const get=async(path:string)=>{const r=await fetch(`${INDEXER}${path}`,{signal:AbortSignal.timeout(15000)});if(!r.ok)throw new Error(`DeepBook indexer HTTP ${r.status} for ${path}`);return r.json() as Promise<any>;};
+ // The indexer's endpoint is spelled /ohclv; rows are [time ms, open, high, low, close, base volume], newest first.
+ const data=await get(`/ohclv/${pool}?interval=${interval}&limit=${limit}`);
+ if(!Array.isArray(data?.candles))throw new Error('DeepBook indexer returned no candles array');
+ const candles=data.candles.filter((c:unknown)=>Array.isArray(c)&&c.length>=5&&c.slice(0,5).every(Number.isFinite)).map((c:number[])=>({time:Math.floor(c[0]/1000),open:c[1],high:c[2],low:c[3],close:c[4],volume:Number.isFinite(c[5])?c[5]:null})).sort((a:any,b:any)=>a.time-b.time);
+ if(!candles.length)throw new Error(`DeepBook indexer has no ${interval} candles for ${pool}`);
+ let change24h:number|null=null;
+ try{const summary=await get('/summary');const row=Array.isArray(summary)?summary.find((r:any)=>r?.trading_pairs===pool):null;if(row&&Number.isFinite(row.price_change_percent_24h))change24h=row.price_change_percent_24h;}catch{}
+ return {pool,interval,source:'DeepBook indexer (mainnet)',candles,change24h,lastPrice:candles.at(-1)!.close,at:new Date().toISOString()};
 }
 function localNow(tz:string){const p=new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());const g=(t:string)=>p.find(x=>x.type===t)?.value??'';return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}`;}
 // Local Vite ports, plus exact extra origins from YOJIMBO_ALLOWED_ORIGINS (comma-separated, e.g. the hosted https origin).
@@ -201,21 +224,33 @@ async function chat(res:ServerResponse,prompt:string,watchManagerId?:string){
   send('message',{text:'Tool limit reached. Please continue in a new message.'});send('done',{});
  }catch(e){send('error',{message:safeError(e)});send('done',{});}finally{res.end()}
 }
+// Every 15 s: every bot position with debt, each on its own pool, is assessed and defended on its own.
+// The per-defence and daily USDC caps stay global (executeDefence counts today's spend across all positions).
 async function watch(){
  lastCheckAt=new Date().toISOString();
  try{
-  const address=owner();const {p,ctx,decision}=await assess(address);
-  const currentPrice=ctx.suiPrice;lastPrice=currentPrice;
-  if(decision.action==='ignore'||Date.now()-lastActionAt<300000||pending.size)return;
-  lastActionAt=Date.now();emit('trace',{decision,recalled:decision.recalledBlobIds});
-  if(decision.mode==='guard-alone')await act(address,decision,ctx,p.managerId!,p.state!);
-  else{
-   const id=memoryId();const timer=setTimeout(async()=>{const item=pending.get(id);if(!item)return;pending.delete(id);const timeout={...item.decision,action:item.decision.timeoutAction};if(timeout.action!=='ignore')await act(item.owner,timeout,item.context,item.managerId,item.state);else await notify(`Yojimbo timed out to Ignore. “${item.decision.quote}”`);},60000);
-   pending.set(id,{decision,context:ctx,owner:address,managerId:p.managerId!,state:p.state!,timer});
-   await notify(`Yojimbo asks first: risk ratio ${ctx.ratio.toFixed(3)}. Proposed ${decision.action}. “${decision.quote}” Respond in app: Approve / Reduce / Ignore. Request ${id}`);
-   emit('approval',{id,decision});
+  const address=owner();
+  const all=(await positions(address)).positions.filter(p=>p.side!=='none');
+  const errors:string[]=[];
+  for(const item of all){
+   try{
+    const {ctx,decision,meta}=await assessPosition(address,item);
+    lastPriceBy.set(item.managerId,item.price);lastPrice=item.price;
+    const busy=[...pending.values()].some(x=>x.managerId===item.managerId);
+    if(decision.action==='ignore'||Date.now()-(lastActionBy.get(item.managerId)??0)<300000||busy)continue;
+    lastActionBy.set(item.managerId,Date.now());lastActionAt=Date.now();
+    emit('trace',{decision,recalled:decision.recalledBlobIds,managerId:item.managerId,...meta});
+    if(decision.mode==='guard-alone')await act(address,decision,ctx,item.managerId,item.state,false,meta);
+    else{
+     const id=memoryId();const timer=setTimeout(async()=>{const it=pending.get(id);if(!it)return;pending.delete(id);const timeout={...it.decision,action:it.decision.timeoutAction};if(timeout.action!=='ignore')await act(it.owner,timeout,it.context,it.managerId,it.state,false,it.meta);else await notify(`Yojimbo timed out to Ignore on ${it.meta.pool} ${it.meta.side}. “${it.decision.quote}”`);},60000);
+     pending.set(id,{decision,context:ctx,owner:address,managerId:item.managerId,state:item.state,meta,timer});
+     await notify(`Yojimbo asks first on ${meta.pool} ${meta.side}: risk ratio ${ctx.ratio.toFixed(3)}. Proposed ${decision.action}. “${decision.quote}” Respond in app: Approve / Reduce / Ignore. Request ${id}`);
+     emit('approval',{id,decision,managerId:item.managerId,...meta});
+    }
+   }catch(e){errors.push(`${item.pool} ${item.side} ${item.managerId.slice(0,10)}: ${safeError(e)}`);}
   }
-  watcherError=null;
+  watcherError=errors.length?errors.join(' | '):null;
+  if(watcherError)emit('status',{watcherError});
  }catch(e){watcherError=safeError(e);emit('status',{watcherError});}
 }
 async function dailySummary(){
@@ -271,10 +306,14 @@ const server=createServer(async(req,res)=>{try{
  if(path==='/bot/unwind'&&req.method==='POST'){
   if(!fork)return json(res,403,{error:'Unwind from the app runs only on a LOCAL FORK; on mainnet use scripts/unwind.ts --mainnet'});
   if(!process.env.YOJIMBO_BOT_KEY)return json(res,400,{error:'Setup required: YOJIMBO_BOT_KEY'});
-  const address=owner();const p=await position(address);
-  if(!p.managerId)return json(res,409,{error:'The bot has no MarginManager'});
-  const r=await unwindPosition(address,p.managerId,address);
-  return json(res,200,{done:r.done,steps:r.steps.map(s=>({step:s.step,txDigest:(s.result as any)?.txDigest??null,status:(s.result as any)?.status?.status??null,mode:(s.result as any)?.mode??null,state:s.state??null}))});
+  const address=owner();const data=await body(req);
+  const mine=(await positions(address)).positions;
+  if(!mine.length)return json(res,409,{error:'The bot has no MarginManager'});
+  // {managerId} picks one of the bot's managers; with none given, the first one with debt (else the first one).
+  const target=typeof data.managerId==='string'?mine.find(m=>m.managerId===data.managerId.toLowerCase()):mine.find(m=>m.side!=='none')??mine[0];
+  if(!target)return json(res,404,{error:'That MarginManager is not one of the bot wallet\'s'});
+  const r=await unwindPosition(address,target.managerId,address);
+  return json(res,200,{managerId:target.managerId,pool:target.pool,side:target.side,done:r.done,steps:r.steps.map(s=>({step:s.step,txDigest:(s.result as any)?.txDigest??null,status:(s.result as any)?.status?.status??null,mode:(s.result as any)?.mode??null,state:s.state??null}))});
  }
  // Setup writes for the bot's own position. Both go through core's write gate: without
  // YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS they are built and dry-run only, never sent.
@@ -282,19 +321,31 @@ const server=createServer(async(req,res)=>{try{
   if(!process.env.YOJIMBO_BOT_KEY)return json(res,400,{error:'Setup required: YOJIMBO_BOT_KEY'});
   const address=owner();
   const data=await body(req);
-  const existing=await position(address);
+  // {pool} defaults to SUI_USDC and {side} to long, so the old body {depositUsdc, borrowUsdc} still opens a SUI/USDC long.
+  const pool=assertPoolKey(typeof data.pool==='string'&&data.pool?data.pool:POOL);
+  const side:'long'|'short'|null=data.side===undefined?'long':data.side==='long'||data.side==='short'?data.side:null;
+  if(!side)return json(res,400,{error:'side must be long or short'});
+  const market=(await markets()).markets.find(m=>m.pool===pool);
+  if(!market)return json(res,400,{error:`${pool} is not margin-enabled on DeepBook mainnet`});
+  const existing=(await positions(address)).positions.find(m=>m.pool===pool);
   let result;
   if(path==='/bot/create'){
-   if(existing.managerId)return json(res,409,{error:'Bot already has a MarginManager',managerId:existing.managerId});
-   result=await createMarginManager(address);
+   if(!market.long.supported&&!market.short.supported)return json(res,400,{error:`${pool}: ${market.long.reason}`});
+   if(existing)return json(res,409,{error:`Bot already has a ${pool} MarginManager`,managerId:existing.managerId,pool});
+   result=await createMarginManager(address,process.env,pool);
   }else{
-   const p=await snapshot(address);
-   if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)return json(res,409,{error:'Position already has debt',managerId:p.managerId});
-   result=await openLong(address,p.managerId!,Number(data.depositUsdc),Number(data.borrowUsdc),p.price!);
+   if(!market[side].supported)return json(res,400,{error:`${side} on ${pool} is not supported: ${market[side].reason}`});
+   if(!existing)return json(res,409,{error:`Setup required: the bot has no ${pool} MarginManager yet (POST /bot/create {"pool":"${pool}"})`});
+   if(existing.side!=='none')return json(res,409,{error:'Position already has debt',managerId:existing.managerId,pool,side:existing.side});
+   const price=existing.price/existing.quotePrice;
+   result=side==='long'
+    ?await openLong(address,existing.managerId,Number(data.depositUsdc),Number(data.borrowUsdc),price,process.env,pool)
+    :await openShort(address,existing.managerId,Number(data.depositUsdc),data.borrowBase!=null?Number(data.borrowBase):Number(data.borrowUsdc)/price,price,process.env,pool);
+   result={...result,managerId:existing.managerId,pool,side};
   }
   const allowed=process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS';
   const note=result.mode==='fork'?`Executed on ${FORK_SOURCE} @ checkpoint ${result.fork.forkedAtCheckpoint}, not mainnet`:result.mode==='mainnet'?'Executed on mainnet':allowed?'Dry run did not succeed, nothing was sent':'Dry-run only: YOJIMBO_ALLOW_MAINNET is not set, nothing was sent';
-  return json(res,200,{...result,note});
+  return json(res,200,{...result,pool,note});
  }
  // LOCAL FORK only: a fork transaction's status and effects from the fork RPC, since Suiscan cannot show it.
  const forkTx=/^\/fork\/tx\/([1-9A-HJ-NP-Za-km-z]{32,50})$/.exec(path);
@@ -312,8 +363,38 @@ const server=createServer(async(req,res)=>{try{
  // The trade ticket's live numbers: the SUI/USDC pool's mid price and lot rules, from the same transport as every read.
  if(path==='/quote'){
   const c=chain(process.env.YOJIMBO_BOT_KEY?owner():'0x0000000000000000000000000000000000000000000000000000000000000000');
-  const [mid,book]=await Promise.all([c.client.deepbook.midPrice(POOL),c.client.deepbook.poolBookParams(POOL)]);
-  return json(res,200,{pool:POOL,midPrice:mid,lotSize:book.lotSize,minSize:book.minSize,source:c.source,at:new Date().toISOString()});
+  const pool=assertPoolKey(new URL(req.url||'/',`http://localhost:${port}`).searchParams.get('pool')||POOL);
+  const [mid,book]=await Promise.all([c.client.deepbook.midPrice(pool),c.client.deepbook.poolBookParams(pool)]);
+  return json(res,200,{pool,midPrice:mid,lotSize:book.lotSize,minSize:book.minSize,source:c.source,at:new Date().toISOString()});
+ }
+ // Every DeepBook pool checked live against the mainnet MarginRegistry: which are margin-enabled and which directions
+ // Yojimbo can trade (long borrows USDC, short borrows the base). Unsupported ones carry a plain-English reason.
+ if(path==='/markets'){const m=await markets();return json(res,200,{markets:m.markets.map(({baseMarginPool,quoteMarginPool,...x})=>({...x,lendingPools:{base:baseMarginPool,quote:quoteMarginPool}})),notMarginEnabled:m.notMarginEnabled,checkedAt:m.checkedAt,source:m.source});}
+ // Real price candles from the public DeepBook indexer (mainnet). No fallback data: a failure is an error.
+ if(path==='/history'){
+  const q=new URL(req.url||'/',`http://localhost:${port}`).searchParams;
+  const pool=assertPoolKey(q.get('pool')||POOL);
+  const interval=q.get('interval')||'1h';
+  if(!['1m','5m','15m','30m','1h','4h','1d','1w'].includes(interval))return json(res,400,{error:'interval must be 1m, 5m, 15m, 30m, 1h, 4h, 1d or 1w'});
+  const limit=Math.min(Math.max(Number(q.get('limit')||168)||168,1),500);
+  return json(res,200,await history(pool,interval,limit));
+ }
+ // Every MarginManager the bot owns, each on its own pool, with side, live ratio, liquidation price and the current decision.
+ if(path==='/positions'){
+  if(!process.env.YOJIMBO_BOT_KEY)return json(res,200,{positions:[],setup:'Setup required: YOJIMBO_BOT_KEY'});
+  const address=owner();const all=await positions(address);
+  const caps={perActionUsdc:Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10),dailyUsdc:Number(process.env.YOJIMBO_DAILY_USDC??30),spentTodayUsdc:spentToday()};
+  const out=[];
+  for(const item of all.positions){
+   const thresholds=await registry(address,process.env,item.pool);
+   const price=item.price/item.quotePrice;
+   const s={baseAsset:Number(item.state.baseAsset),quoteAsset:Number(item.state.quoteAsset),baseDebt:Number(item.state.baseDebt),quoteDebt:Number(item.state.quoteDebt)};
+   const liq=liquidationPrice(s,Number(thresholds.liquidation));
+   let decision:Decision|null=null,decisionError:string|undefined;
+   if(item.side!=='none'){try{decision=(await assessPosition(address,item)).decision;}catch(e){decisionError=safeError(e);}}
+   out.push({managerId:item.managerId,pool:item.pool,side:item.side,riskRatio:item.side==='none'?null:item.state.riskRatio,state:item.state,price,liquidation:{ratio:Number(thresholds.liquidation),minBorrowRatio:Number(thresholds.minBorrow)},liquidationPrice:liq?{price:liq.price,direction:liq.direction,movePercent:(liq.price/price-1)*100}:null,decision,decisionError,caps});
+  }
+  return json(res,200,{owner:address,positions:out,source:all.source});
  }
  if(path==='/position')return json(res,200,await position(owner()));
  if(path==='/memory'&&process.env.YOJIMBO_BOT_KEY&&!memoryReady()&&fork&&process.env.YOJIMBO_FORK_RULES){const address=owner();const hits=await forkRuleHits(resolve(process.cwd(),'../..',process.env.YOJIMBO_FORK_RULES));let currentDecision:Decision|null=null;try{const {ctx}=await context(address);currentDecision=decide(hits,ctx);}catch{}return json(res,200,{hits,decision:currentDecision,source:'local-file',setup:'Setup required: Walrus Memory'});}
@@ -322,12 +403,14 @@ const server=createServer(async(req,res)=>{try{
  if(path==='/chat'&&req.method==='POST'){const data=await body(req);return chat(res,String(data.message||''),typeof data.watchManagerId==='string'?data.watchManagerId:undefined);}
  if(path==='/decision'&&req.method==='POST'){const data=await body(req);const item=pending.get(data.id);if(!item)return json(res,404,{error:'Approval request expired'});clearTimeout(item.timer);pending.delete(data.id);
   const action:Action=data.choice==='approve'?item.decision.action:data.choice==='reduce'?'reduce':'ignore';if(action==='ignore'){await notify('Yojimbo ignored the alert at owner request.');return json(res,200,{outcome:'ignored'});}
-  return json(res,200,await act(item.owner,{...item.decision,action},item.context,item.managerId,item.state));}
+  return json(res,200,await act(item.owner,{...item.decision,action},item.context,item.managerId,item.state,false,item.meta));}
  return json(res,404,{error:'Not found'});
-}catch(e){return json(res,500,{error:safeError(e)});}});
+}catch(e){return json(res,/Unknown DeepBook pool/.test(String(e))?400:500,{error:safeError(e)});}});
 server.listen(port,'127.0.0.1',()=>console.log(`Yojimbo server listening on localhost:${port}`));
 // The live manager scan takes about 40 s on Tatum's free plan, so the server keeps the last result and refreshes it in the background.
 let recentState:{at:number;value:Promise<Awaited<ReturnType<typeof recentWithRisk>>>}|null=null;let recentRefresh:Promise<Awaited<ReturnType<typeof recentWithRisk>>>|null=null;
 function recentCached(){const age=recentState?Date.now()-recentState.at:Infinity;if(age>60_000&&!recentRefresh){const next=recentWithRisk();recentRefresh=next;next.then(()=>{recentState={at:Date.now(),value:next}}).catch(()=>{}).finally(()=>{recentRefresh=null})}if(recentState&&age<600_000)return recentState.value;return recentRefresh??recentState!.value}
 void recentCached();setInterval(()=>void recentCached(),60_000).unref();
+// The market scan takes about a minute on Tatum's free plan; warm it at start and every 9 minutes (core caches 10).
+void markets().catch(()=>{});setInterval(()=>void markets().catch(()=>{}),540_000).unref();
 setInterval(watch,15000);setTimeout(watch,1000);setInterval(dailySummary,60000);void telegramWorker();
