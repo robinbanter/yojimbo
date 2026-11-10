@@ -1,10 +1,11 @@
 export type Action = 'deposit' | 'reduce' | 'repay' | 'ignore';
 export type Mode = 'guard-alone' | 'ask-first';
 export type Memory =
-  | { version: 'YOJIMBO_V1'; kind: 'schedule'; id: string; createdAt: string; text: string; recurrence: 'daily' | 'weekdays' | 'once'; start: string; end: string; timezone: string; mode: Mode }
+  | { version: 'YOJIMBO_V1'; kind: 'schedule'; id: string; createdAt: string; text: string; recurrence: 'daily' | 'weekdays' | 'weekends' | 'once'; start: string; end: string; timezone: string; mode: Mode }
   | { version: 'YOJIMBO_V1'; kind: 'rule'; id: string; createdAt: string; text: string; action: Action; belowRatio?: number; movePercent?: number; maxUsdc?: number; alertRatio?: number; mode?: Mode; defaultOnTimeout?: Action }
   | { version: 'YOJIMBO_V1'; kind: 'override'; id: string; createdAt: string; text: string; supersedes: string; action: Action; mode: Mode; ratio: number; movePercent: number; verdict: 'correction' | 'approval' }
   | { version: 'YOJIMBO_V1'; kind: 'event'; id: string; createdAt: string; text: string; beforeRatio: number; afterRatio: number | null; suiPrice: number; movePercent: number; mode: Mode; action: Action; txDigest: string | null; outcome: string; ruleIds: string[] }
+  | { version: 'YOJIMBO_V1'; kind: 'retire'; id: string; createdAt: string; text: string; ids: string[] }
   | { version: 'YOJIMBO_V1'; kind: 'summary'; id: string; createdAt: string; text: string; position: string; pnlUsdc: number | null };
 export type Hit = { blobId: string; memory: Memory; distance?: number };
 export type Context = { at: Date; ratio: number; movePercent: number; suiPrice: number };
@@ -30,13 +31,29 @@ export function scheduleActive(s: Extract<Memory, {kind:'schedule'}>, at: Date):
   const a = hm(s.start), b = hm(s.end);
   const inWindow = a <= b ? p.minutes >= a && p.minutes < b : p.minutes >= a || p.minutes < b;
   if (!inWindow) return false;
-  if (s.recurrence === 'weekdays') {
+  if (s.recurrence === 'weekdays' || s.recurrence === 'weekends') {
     const weekday = a > b && p.minutes < b ? localParts(new Date(at.getTime()-86400000), s.timezone).weekday : p.weekday;
-    return !['Sat','Sun'].includes(weekday);
+    const weekend = ['Sat','Sun'].includes(weekday);
+    return s.recurrence === 'weekends' ? weekend : !weekend;
   }
   return true;
 }
-export function decide(hits: Hit[], context: Context, alertRatio = 1.5): Decision {
+/** A positive finite number, else undefined: models often send 0 for "not stated", which must not become a threshold. */
+const pos = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+/** Rule numbers the owner never stated are dropped, so a 0 can't silently disable alerts. */
+export function cleanRule<T extends Extract<Memory, {kind:'rule'}>>(r: T): T {
+  return { ...r, belowRatio: pos(r.belowRatio), movePercent: pos(r.movePercent), maxUsdc: pos(r.maxUsdc), alertRatio: pos(r.alertRatio) };
+}
+/** Memories the owner asked Yojimbo to forget (a retire memory lists their ids); Walrus is append-only, so forgetting is a memory too. */
+export function retiredIds(memories: Memory[]): Set<string> {
+  return new Set(memories.flatMap(m => (m.kind === 'retire' ? m.ids : [])));
+}
+export function live(hits: Hit[]): Hit[] {
+  const gone = retiredIds(hits.map(h => h.memory));
+  return hits.filter(h => h.memory.kind !== 'retire' && !gone.has(h.memory.id)).map(h => (h.memory.kind === 'rule' ? { ...h, memory: cleanRule(h.memory) } : h));
+}
+export function decide(allHits: Hit[], context: Context, alertRatio = 1.5): Decision {
+  const hits = live(allHits);
   const memories = hits.map(h => h.memory);
   const schedules = memories.filter((m): m is Extract<Memory,{kind:'schedule'}> => m.kind === 'schedule').sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
   const active = schedules.find(s => scheduleActive(s, context.at));
@@ -52,7 +69,7 @@ export function decide(hits: Hit[], context: Context, alertRatio = 1.5): Decisio
   const source = relevant ?? chosen;
   const action: Action = triggered && source ? source.action : 'ignore';
   const quote = source?.text ?? 'No recalled rule permits an action.';
-  return { mode, action, amountUsdc: action === 'ignore' ? 0 : chosen?.maxUsdc ?? 10, reason: triggered ? (source ? `Recalled ${source.kind} ${source.id}` : 'No matching recalled rule') : 'No alert threshold crossed', quote, ruleIds: source ? (source.kind === 'override' ? [source.supersedes,source.id] : [source.id]) : [], recalledBlobIds: hits.map(h=>h.blobId), timeoutAction: chosen?.defaultOnTimeout ?? 'ignore', nextWindow, alertRatio: personalAlert };
+  return { mode, action, amountUsdc: action === 'ignore' ? 0 : chosen?.maxUsdc ?? 10, reason: triggered ? (source ? `Recalled ${source.kind} ${source.id}` : 'No matching recalled rule') : 'No alert threshold crossed', quote, ruleIds: source ? (source.kind === 'override' ? [source.supersedes,source.id] : [source.id]) : [], recalledBlobIds: allHits.map(h=>h.blobId), timeoutAction: chosen?.defaultOnTimeout ?? 'ignore', nextWindow, alertRatio: personalAlert };
 }
 
 /**

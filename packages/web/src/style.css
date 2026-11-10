@@ -567,3 +567,7 @@ a.link:hover { border-color: var(--indigo); }
 .console-head h1::after { content: ''; position: absolute; left: 0; bottom: 0; width: min(420px, 60%); height: 3px; border-radius: 3px; background: linear-gradient(90deg, var(--gold), rgba(240, 201, 135, 0)); }
 .memory { border-color: rgba(201, 163, 90, 0.4); box-shadow: 0 10px 24px -18px rgba(29, 25, 19, 0.5); }
 .top { border-bottom: 1px solid rgba(240, 201, 135, 0.18); }
+
+.memory.forgotten{opacity:.55}
+.memory.forgotten .type{color:inherit}
+.memory.kind-retire .type{letter-spacing:.04em}

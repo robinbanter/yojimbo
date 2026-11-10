@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
+import { live, cleanRule, liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
 
 const port=Number(process.env.PORT ?? 8787);
 // Fork runs keep their own event log (YOJIMBO_DATA_DIR) so fork digests never mix with mainnet history.
@@ -82,16 +82,32 @@ async function tool(name:string,args:any,ownerAddress:string){
  if(name==='list_recent_managers')return {managers:await recentWithRisk()};
  if(name==='create_margin_manager'){const existing=await position(ownerAddress);if(existing.managerId)throw new Error('Bot already has a MarginManager');return createMarginManager(ownerAddress);}
  if(name==='open_position'){const p=await snapshot(ownerAddress);if(Number(p.state!.baseDebt)>0||Number(p.state!.quoteDebt)>0)throw new Error('Position already has debt');return openLong(ownerAddress,p.managerId!,Number(args.depositUsdc),Number(args.borrowUsdc),p.price!);}
- if(name==='list_rules'){if(!memoryReady())return {error:'Setup required: Walrus Memory'};const hits=await memoryFor(ownerAddress).recallQuery('Yojimbo all schedules rules overrides and owner preferences');return {items:hits.filter(h=>['rule','schedule','override'].includes(h.memory.kind)),recalled:hits.map(h=>h.blobId)};}
- if(['add_rule','add_schedule','record_override'].includes(name)&&!memoryReady())return {error:'Setup required: Walrus Memory'};
+ if(name==='list_rules'){if(!memoryReady())return {error:'Setup required: Walrus Memory'};const hits=await memoryFor(ownerAddress).recallQuery('Yojimbo all schedules rules overrides and owner preferences');return {items:live(hits).filter(h=>['rule','schedule','override'].includes(h.memory.kind)),forgotten:hits.filter(h=>h.memory.kind==='retire').map(h=>h.memory),recalled:hits.map(h=>h.blobId)};}
+ if(['add_rule','add_schedule','record_override','forget_memories'].includes(name)&&!memoryReady())return {error:'Setup required: Walrus Memory'};
  if(name==='add_rule'){
   if(!['deposit','reduce','repay','ignore'].includes(args.action))throw new Error('Invalid action');
-  const memory:Memory={version:'YOJIMBO_V1',kind:'rule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),action:args.action,belowRatio:args.belowRatio,movePercent:args.movePercent,maxUsdc:args.maxUsdc,alertRatio:args.alertRatio,mode:args.mode,defaultOnTimeout:args.defaultOnTimeout};return {blobId:await remember(ownerAddress,memory),memory};
+  const memory=cleanRule({version:'YOJIMBO_V1',kind:'rule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),action:args.action,belowRatio:args.belowRatio,movePercent:args.movePercent,maxUsdc:args.maxUsdc,alertRatio:args.alertRatio,mode:args.mode,defaultOnTimeout:args.defaultOnTimeout} as Extract<Memory,{kind:'rule'}>);
+  const cap=Number(process.env.YOJIMBO_MAX_DEFENCE_USDC??10);
+  if(memory.maxUsdc!=null&&memory.maxUsdc>cap)return {error:`Refused: maxUsdc ${memory.maxUsdc} is above the hard cap of ${cap} USDC per defence. Ask the owner for an amount at or below ${cap}, or leave maxUsdc out.`};
+  return {blobId:await remember(ownerAddress,memory),memory};
  }
  if(name==='add_schedule'){
-  const memory:Memory={version:'YOJIMBO_V1',kind:'schedule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),recurrence:args.recurrence,start:String(args.start),end:String(args.end),timezone:String(args.timezone||'Asia/Kolkata'),mode:args.mode};return {blobId:await remember(ownerAddress,memory),memory};
+  const tz=String(args.timezone||'Asia/Kolkata'),start=String(args.start),end=String(args.end);
+  if(!['daily','weekdays','weekends','once'].includes(args.recurrence))return {error:'Refused: recurrence must be daily, weekdays, weekends or once'};
+  if(args.recurrence==='once'){
+   const f=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;if(!f.test(start)||!f.test(end))return {error:'Refused: a one-time schedule needs start and end as YYYY-MM-DDTHH:MM local time'};
+   const nowLocal=localNow(tz);if(end<=nowLocal)return {error:`Refused: that window (${start} to ${end} ${tz}) has already ended; it is ${nowLocal} there now. Check the year.`};
+   if(end<=start)return {error:'Refused: end must be after start'};
+  }else if(!/^\d{2}:\d{2}$/.test(start)||!/^\d{2}:\d{2}$/.test(end))return {error:'Refused: a recurring schedule needs start and end as HH:MM'};
+  const memory:Memory={version:'YOJIMBO_V1',kind:'schedule',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text),recurrence:args.recurrence,start,end,timezone:tz,mode:args.mode};return {blobId:await remember(ownerAddress,memory),memory};
  }
  if(name==='record_override')return recordOverride(ownerAddress,args);
+ if(name==='forget_memories'){
+  const ids=(Array.isArray(args.ids)?args.ids:[]).map(String).filter(Boolean);if(!ids.length)return {error:'Refused: give the ids of the memories to forget (from list_rules)'};
+  const known=new Set((await memoryFor(ownerAddress).recallQuery('Yojimbo all schedules rules overrides and owner preferences')).map(h=>h.memory.id));
+  const unknown=ids.filter((id:string)=>!known.has(id));if(unknown.length)return {error:`Refused: no remembered rule or schedule has id ${unknown.join(', ')}`};
+  const memory:Memory={version:'YOJIMBO_V1',kind:'retire',id:memoryId(),createdAt:new Date().toISOString(),text:String(args.text||'Owner asked to forget these'),ids};return {blobId:await remember(ownerAddress,memory),memory};
+ }
  if(name==='simulate_defence'||name==='defend'){
   const {p,ctx,decision}=await assess(ownerAddress);
   emit('trace',{decision,recalled:decision.recalledBlobIds});
@@ -99,10 +115,12 @@ async function tool(name:string,args:any,ownerAddress:string){
  }
  throw new Error(`Unknown tool ${name}`);
 }
+function localNow(tz:string){const p=new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());const g=(t:string)=>p.find(x=>x.type===t)?.value??'';return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}`;}
 const toolSchemas=[
  ['get_position','Read a DeepBook Margin position by owner address, defaulting to bot owner',{owner:{type:'string'}}],['get_risk','Read position risk and SUI/USDC margin pool thresholds; provide managerId for a watched position',{owner:{type:'string'},managerId:{type:'string'}}],['watch_position','Read live risk and deterministic decision for a MarginManager ID',{managerId:{type:'string'}}],['list_recent_managers','List recent real SUI/USDC MarginManagers with live risk ratios',{}],['create_margin_manager','Create a bot-owned SUI/USDC MarginManager, dry-run unless mainnet enabled',{}],['open_position','Deposit USDC, borrow USDC and buy SUI to open a long; dry-run unless mainnet enabled',{depositUsdc:{type:'number'},borrowUsdc:{type:'number'}}],['list_rules','Recall rules, schedules and overrides from Walrus Memory',{}],
  ['add_rule','Remember a defence rule',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},belowRatio:{type:'number'},movePercent:{type:'number'},maxUsdc:{type:'number'},alertRatio:{type:'number'},mode:{type:'string',enum:['guard-alone','ask-first']},defaultOnTimeout:{type:'string',enum:['deposit','reduce','repay','ignore']}}],
- ['add_schedule','Remember a recurring or one-time schedule',{text:{type:'string'},recurrence:{type:'string',enum:['daily','weekdays','once']},start:{type:'string'},end:{type:'string'},timezone:{type:'string'},mode:{type:'string',enum:['guard-alone','ask-first']}}],
+ ['add_schedule','Remember a recurring or one-time schedule',{text:{type:'string'},recurrence:{type:'string',enum:['daily','weekdays','weekends','once']},start:{type:'string'},end:{type:'string'},timezone:{type:'string'},mode:{type:'string',enum:['guard-alone','ask-first']}}],
+ ['forget_memories','Forget remembered rules or schedules by id (writes a retire memory to Walrus; the old ones stop counting)',{ids:{type:'array',items:{type:'string'}},text:{type:'string'}}],
  ['record_override','Remember owner correction or approval for last defence',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},verdict:{type:'string',enum:['correction','approval']}}],
  ['simulate_defence','Recall rules and dry-run current defence',{}],['defend','Recall rules and execute current defence, gated by YOJIMBO_ALLOW_MAINNET',{}]
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties,additionalProperties:false}}}));
@@ -117,9 +135,9 @@ async function chat(res:ServerResponse,prompt:string,watchManagerId?:string){
  const send=(type:string,data:unknown)=>res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
  try{
   const address=process.env.YOJIMBO_BOT_KEY?owner():'0x1';
-  const messages:any[]=[{role:'system',content:`You are Yojimbo, a cautious Sui DeepBook margin bodyguard. Use tools for every factual position or memory claim. Never invent chain or memory data or remembered rules. Defence decisions are deterministic. If a memory tool returns Setup required: Walrus Memory, say that clearly and do not claim to remember. Watched positions are read-only and Yojimbo cannot act on someone else's position. Reply in plain text for a chat bubble: no markdown, no headings, no bullet lists, at most four short sentences, and quote numbers exactly as the tools returned them. ${watchManagerId?`Current watched manager ID: ${watchManagerId}. Use watch_position or get_risk with this managerId for risk questions.`:''} State clearly that actions are dry-run unless mainnet is enabled. One-time schedule start/end are YYYY-MM-DDTHH:MM local. Do not claim success on a failed dry-run.`},{role:'user',content:prompt}];
+  const messages:any[]=[{role:'system',content:`You are Yojimbo, a cautious Sui DeepBook margin bodyguard. Use tools for every factual position or memory claim. Never invent chain or memory data or remembered rules. Defence decisions are deterministic. If a memory tool returns Setup required: Walrus Memory, say that clearly and do not claim to remember. Watched positions are read-only and Yojimbo cannot act on someone else's position. Reply in plain text for a chat bubble: no markdown, no headings, no bullet lists, at most four short sentences, and quote numbers exactly as the tools returned them. ${watchManagerId?`Current watched manager ID: ${watchManagerId}. Use watch_position or get_risk with this managerId for risk questions.`:''} State clearly that actions are dry-run unless mainnet is enabled. Right now it is ${localNow('Asia/Kolkata')} in Asia/Kolkata (India time) and ${new Date().toISOString().slice(0,16)} UTC; resolve dates like today or Nov 12 against this year. One-time schedule start/end are YYYY-MM-DDTHH:MM local. Only fill a rule or schedule field the owner actually stated; leave every other field out, never invent ratios or amounts. A general preference such as preferring to add collateral is a rule with just that action and no numbers. To change or remove a remembered rule, call list_rules, then forget_memories with its id. Do not claim success on a failed dry-run.`},{role:'user',content:prompt}];
   for(let i=0;i<8;i++){
-   const reply=await openRouter(messages,watchManagerId?toolSchemas.filter(t=>['get_risk','watch_position','list_recent_managers','list_rules','add_rule','add_schedule','record_override'].includes(String(t.function.name))):toolSchemas);messages.push(reply);
+   const reply=await openRouter(messages,watchManagerId?toolSchemas.filter(t=>['get_risk','watch_position','list_recent_managers','list_rules','add_rule','add_schedule','record_override','forget_memories'].includes(String(t.function.name))):toolSchemas);messages.push(reply);
    if(!reply.tool_calls?.length){send('message',{text:reply.content||''});send('done',{});return;}
    for(const call of reply.tool_calls){const name=call.function.name;let args:any={};try{args=JSON.parse(call.function.arguments||'{}');}catch{}
     send('tool',{name,args});let result:unknown;try{result=watchManagerId&&!['get_risk','watch_position','list_recent_managers','list_rules'].includes(name)?{error:memoryReady()?'Watch mode is read-only':'Setup required: Walrus Memory'}:await tool(name,args,address);}catch(e){result={error:safeError(e)};}

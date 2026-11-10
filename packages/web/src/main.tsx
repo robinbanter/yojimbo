@@ -4,7 +4,7 @@ import './style.css';
 
 type Hit = {
   blobId: string;
-  memory: { kind: string; id: string; text: string; createdAt: string; supersedes?: string; action?: string };
+  memory: { kind: string; id: string; text: string; createdAt: string; supersedes?: string; action?: string; ids?: string[] };
 };
 type Decision = {
   mode: string;
@@ -57,7 +57,7 @@ const api = (path: string) =>
   });
 const short = (s: string) => `${s.slice(0, 6)}…${s.slice(-4)}`;
 const clock = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const KIND_LABEL: Record<string, string> = { schedule: 'Schedule', rule: 'Rule', override: 'Your correction' };
+const KIND_LABEL: Record<string, string> = { schedule: 'Schedule', rule: 'Rule', override: 'Your correction', retire: 'You asked to forget' };
 const STARTERS = [
   'How close is the position I am watching to liquidation?',
   'I sleep 01:00 to 08:00 IST every day',
@@ -335,7 +335,8 @@ function App() {
   })();
   const tier: Tier | null = cushion ? (cushion.kind === 'move' ? cushion.tier : cushion.kind === 'at' ? 'danger' : 'safe') : null;
   const tierWord = tier === 'danger' ? (cushion?.kind === 'at' ? 'Liquidatable' : 'Danger') : tier === 'watch' ? 'Watch' : tier === 'safe' ? 'Safe' : '';
-  const kept = memory.filter((h) => ['schedule', 'rule', 'override'].includes(h.memory.kind));
+  const gone = new Set<string>(memory.flatMap((h) => (h.memory.kind === 'retire' && Array.isArray(h.memory.ids) ? h.memory.ids : [])));
+  const kept = memory.filter((h) => ['schedule', 'rule', 'override', 'retire'].includes(h.memory.kind));
   const memorySetup = status?.memory?.startsWith('Setup required');
   const atLiq = (managers ?? []).filter((m) => m.riskRatio <= m.liquidationRatio);
   const dryRunDefence = async () => {
@@ -851,9 +852,9 @@ function App() {
                 {kept.map((h) => {
                   const old = h.memory.supersedes ? memory.find((x) => x.memory.id === h.memory.supersedes) : undefined;
                   return (
-                    <article className={`memory kind-${h.memory.kind}`} key={h.blobId}>
-                      <span className="type">{KIND_LABEL[h.memory.kind] ?? h.memory.kind}</span>
-                      <p>{h.memory.text}</p>
+                    <article className={`memory kind-${h.memory.kind}${gone.has(h.memory.id) ? ' forgotten' : ''}`} key={h.blobId}>
+                      <span className="type">{gone.has(h.memory.id) ? 'Forgotten · no longer used' : KIND_LABEL[h.memory.kind] ?? h.memory.kind}</span>
+                      <p>{gone.has(h.memory.id) ? <s>{h.memory.text}</s> : h.memory.text}</p>
                       {h.memory.supersedes && (
                         <p className="supersedes">
                           replaces: <s>{old?.memory.text ?? h.memory.supersedes}</s>
