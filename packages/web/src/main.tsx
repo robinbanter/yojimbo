@@ -149,6 +149,9 @@ function App() {
   const [unwind, setUnwind] = useState<{ busy: boolean; error?: string; steps?: { step: string; txDigest: string | null; status: string | null }[]; done?: boolean } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [quote, setQuote] = useState<{ midPrice: number; lotSize: number; minSize: number; source: string } | null>(null);
+  const [quoteError, setQuoteError] = useState('');
+  const [opened, setOpened] = useState<{ label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[]>([]);
   const [tick, setTick] = useState(() => Date.now());
   const [botWatched, setBotWatched] = useState<any>(null);
   const autoBot = useRef(false);
@@ -198,6 +201,12 @@ function App() {
       clearInterval(id);
       stream.close();
     };
+  }, []);
+  useEffect(() => {
+    const load = () => api('/quote').then((q) => (setQuote(q), setQuoteError('')), (e) => setQuoteError(String((e as Error).message ?? e)));
+    load();
+    const id = setInterval(load, 15_000);
+    return () => clearInterval(id);
   }, []);
   useEffect(() => {
     const id = setInterval(() => setTick(Date.now()), 1000);
@@ -609,25 +618,59 @@ function App() {
 
         {route === 'app' && (
           <div className="page page-guard">
-            {/* Slim setup: only the next step, the rest in a drawer. */}
-            <div className={`setup-bar ${nextStep === -1 ? 'is-done' : ''}`} data-film="setup">
-              <ol className="setup-steps" aria-label="Set up">
-                {SETUP_SHORT.map((t, i) => (
-                  <li key={t} className={`s-${steps3[i]} ${i === nextStep ? 'next' : ''}`}>
-                    <i aria-hidden="true">{steps3[i] === 'done' ? <Check /> : i + 1}</i>
-                    {t}
-                  </li>
-                ))}
+            {/* What Yojimbo does, in three plain steps; wallet and rule setup stay in a drawer. */}
+            <div className="explain-wrap" data-film="setup">
+              <ol className="explain" data-film="explain">
+                <li className={steps3[1] === 'done' ? 'done' : ''}>
+                  <b>1</b>
+                  <span>
+                    <strong>You open a borrowed-money trade.</strong> Your USDC plus a loan buys SUI.
+                  </span>
+                </li>
+                <li className={steps3[2] === 'done' ? 'done' : ''}>
+                  <b>2</b>
+                  <span>
+                    <strong>You tell Yojimbo your hours and limits</strong> in chat. It keeps them on Walrus.
+                  </span>
+                </li>
+                <li>
+                  <b>3</b>
+                  <span>
+                    <strong>While you sleep, it watches the liquidation line</strong> and adds money before you lose everything, then texts you.
+                  </span>
+                </li>
               </ol>
-              <p className="setup-next">{nextStep === -1 ? 'Set up' : `Next: ${SETUP_NEXT[nextStep]}`}</p>
-              <button className="pill pill-line pill-sm" aria-expanded={setupOpen} aria-controls="setup-drawer" onClick={() => setSetupOpen((v) => !v)}>
-                {setupOpen ? 'Close' : 'Set up'}
+              <button className="link-btn" aria-expanded={setupOpen} aria-controls="setup-drawer" onClick={() => setSetupOpen((v) => !v)}>
+                {setupOpen ? 'Hide wallet and setup' : 'Wallet and setup'}
               </button>
             </div>
             {setupOpen && (
               <section className="card setup-drawer" id="setup-drawer" aria-label="Set up">
                 {journey('panel')}
               </section>
+            )}
+
+            {status?.wallet && position && !hasDebt && (
+              <Ticket quote={quote} quoteError={quoteError} status={status} registry={registry} actsBelow={actsBelow} caps={caps} hasManager={!!position?.managerId} onDone={() => void refresh()} onOpened={setOpened} />
+            )}
+
+            {hasDebt && opened.some((l) => l.digest) && (
+              <p className="opened" data-film="opened">
+                <b>Opened</b>
+                {opened
+                  .filter((l) => l.digest)
+                  .map((l) =>
+                    l.fork ? (
+                      <Link key={l.digest} to={`/tx/${l.digest}`} className="ext" data-film="open-tx">
+                        {l.label} <span className="mono">{short(l.digest!)}</span> <ForkTag />
+                      </Link>
+                    ) : (
+                      <a key={l.digest} className="ext" href={`https://suiscan.xyz/mainnet/tx/${l.digest}`} target="_blank" rel="noreferrer">
+                        {l.label} <ArrowOut />
+                      </a>
+                    ),
+                  )}
+              </p>
             )}
 
             {/* (1) The guard at a glance */}
@@ -743,10 +786,10 @@ function App() {
                 {source === 'bot' && status?.watcherError && !/^(Error:\s*)?Setup required/.test(status.watcherError) && <p className="err-line">{status.watcherError.replace(/^Error:\s*/, '')}</p>}
                 {state ? (
                   <dl className="mini-kv">
-                    <Fact k="Collateral" v={fmtAmt(state.baseAsset)} unit="SUI" />
-                    <Fact k="Debt" v={fmtAmt(state.quoteDebt)} unit="USDC" />
-                    <Fact k="Cash held" v={fmtAmt(state.quoteAsset)} unit="USDC" />
-                    <Fact k="SUI price" v={visiblePosition.price != null ? `$${Number(visiblePosition.price).toFixed(4)}` : '—'} unit="USD" />
+                    <Fact k="Collateral" v={fmtAmt(state.baseAsset)} unit="SUI" hint="SUI the trade holds" />
+                    <Fact k="Debt" v={fmtAmt(state.quoteDebt)} unit="USDC" hint="USDC it borrowed" />
+                    <Fact k="Cash held" v={fmtAmt(state.quoteAsset)} unit="USDC" hint="USDC not spent on SUI" />
+                    <Fact k="SUI price" v={visiblePosition.price != null ? `$${Number(visiblePosition.price).toFixed(4)}` : '—'} unit="USD" hint="price now, from the oracle" />
                   </dl>
                 ) : (
                   <p className="fine">{source === 'watch' ? (watchError ? '' : 'Reading the position…') : 'Nothing open yet.'}</p>
@@ -1273,7 +1316,7 @@ function Landing(props: {
             <h1>
               A bodyguard for your leverage <span>while you sleep.</span>
             </h1>
-            <p className="lede">It watches your borrowed-money trade and steps in, inside your rules, before you get sold out.</p>
+            <p className="lede">If you borrow to trade and the price falls too far, the exchange sells your position to repay the loan. That is liquidation. Yojimbo watches while you sleep and adds money before it happens.</p>
             <div className="hero-cta">
               <Link to="/app" className="pill pill-navy pill-lg" data-film="hero-cta">
                 Open the app <Arrow />
@@ -1599,6 +1642,178 @@ function TxPage({ digest }: { digest: string }) {
         </section>
       )}
     </div>
+  );
+}
+
+/** The trade ticket: Long SUI with your USDC and a leverage choice. The preview uses the pool's live mid price and lot
+ * size and the same rule as openLong(): 90% of deposit + borrow buys SUI at market, the rest stays as USDC. Risk ratio =
+ * (SUI × price + USDC) ÷ USDC debt, so the liquidation price is where that ratio meets the pool's line. Before fees. */
+const LEVERAGES = [1.5, 2, 3];
+function Ticket(props: {
+  quote: { midPrice: number; lotSize: number; minSize: number; source: string } | null;
+  quoteError: string;
+  status: Status;
+  registry: any;
+  actsBelow: number;
+  caps?: { perActionUsdc: number; dailyUsdc: number };
+  hasManager: boolean;
+  onDone: () => void;
+  onOpened: (lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[]) => void;
+}) {
+  const { quote, registry, actsBelow, caps, status } = props;
+  const [deposit, setDeposit] = useState('6');
+  const [lev, setLev] = useState(1.5);
+  const [run, setRun] = useState<{ busy: boolean; lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[] } | null>(null);
+  const d = Number(deposit);
+  const b = Number.isFinite(d) ? Math.round(d * (lev - 1) * 100) / 100 : NaN;
+  const p = quote?.midPrice;
+  const liqLine: number | undefined = registry?.liquidation;
+  const minBorrow: number | undefined = registry?.minBorrow;
+  const wallet = status.usdcBalance != null ? Number(status.usdcBalance) / 1e6 : null;
+  const lot = quote?.lotSize ?? 0.1;
+  const size = p && d > 0 ? Math.floor(((d + b) * 0.9) / p / lot) * lot : null;
+  const left = size != null && p ? d + b - size * p : null;
+  const ratio0 = b > 0 ? (d + b) / b : null;
+  const priceAt = (r: number) => (size && left != null && b > 0 ? (r * b - left) / size : null);
+  const liqPrice = liqLine != null ? priceAt(liqLine) : null;
+  const alertPrice = priceAt(actsBelow);
+  const cap = caps?.perActionUsdc;
+  const problem = !(d > 0)
+    ? 'Enter how much USDC you put in.'
+    : wallet != null && d > wallet
+      ? `The bot wallet holds ${wallet.toFixed(2)} USDC. Put in less, or fund it first (Wallet and setup).`
+      : cap != null && (d > cap || b > cap)
+        ? `Each amount must be at most ${cap} USDC, Yojimbo's per-action cap.`
+        : minBorrow != null && ratio0 != null && ratio0 < minBorrow
+          ? `At ${lev}× the trade would start under the pool's minimum ratio ${minBorrow.toFixed(2)}. Pick less leverage.`
+          : size != null && quote && size < quote.minSize
+            ? `That buys less than the pool's minimum order (${quote.minSize} SUI). Put in more.`
+            : '';
+  const open = async () => {
+    if (problem || run?.busy || !p) return;
+    const lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[] = [];
+    setRun({ busy: true, lines });
+    try {
+      if (!props.hasManager) {
+        const r = await post('/bot/create', {});
+        lines.push({ label: 'Create the margin account', text: outcome(r), ok: sent(r), digest: r.txDigest, fork: r.mode === 'fork' });
+        setRun({ busy: true, lines: [...lines] });
+        if (!sent(r)) return;
+      }
+      const o = await post('/bot/open', { depositUsdc: d, borrowUsdc: b });
+      lines.push({ label: 'Deposit, borrow and buy SUI', text: outcome(o), ok: sent(o), digest: o.txDigest, fork: o.mode === 'fork' });
+    } catch (e) {
+      lines.push({ label: 'Refused', text: String((e as Error).message ?? e), ok: false });
+    } finally {
+      setRun({ busy: false, lines: [...lines] });
+      props.onOpened([...lines]);
+      props.onDone();
+    }
+  };
+  const usd = (v: number | null | undefined, dp = 4) => (v == null || !Number.isFinite(v) ? '—' : `$${v.toFixed(dp)}`);
+  return (
+    <section className="card ticket" aria-labelledby="ticket-title" data-film="ticket">
+      <div className="tk-head">
+        <img src="/tokens/sui.svg" alt="" width={44} height={44} />
+        <div>
+          <h2 id="ticket-title">Long SUI</h2>
+          <p>Borrow USDC to buy more SUI · DeepBook Margin, SUI/USDC</p>
+        </div>
+        <div className="tk-price">
+          <b className="num">{usd(p)}</b>
+          <span>{props.quoteError ? 'price unavailable' : `SUI price now · ${quote?.source ?? '…'}`}</span>
+        </div>
+      </div>
+      {props.quoteError && <p className="err-line">Price: {props.quoteError}</p>}
+      <div className="tk-grid">
+        <div className="tk-in">
+          <label className="tk-field">
+            <span>Your money in</span>
+            <span className="field">
+              <img src="/tokens/usdc.svg" alt="" width={22} height={22} />
+              <input inputMode="decimal" value={deposit} onChange={(e) => setDeposit(e.target.value)} aria-label="Your money in, USDC" data-film="ticket-amount" />
+              <em>USDC</em>
+            </span>
+            <small>{wallet != null ? `Bot wallet holds ${wallet.toFixed(2)} USDC` : 'Bot wallet balance unknown'}</small>
+          </label>
+          <div className="tk-field">
+            <span>Leverage</span>
+            <div className="tk-lev" role="group" aria-label="Leverage">
+              {LEVERAGES.map((l) => (
+                <button key={l} className={lev === l ? 'on' : ''} aria-pressed={lev === l} onClick={() => setLev(l)} data-film={`lev-${l}`}>
+                  {l}×
+                </button>
+              ))}
+            </div>
+            <small>{Number.isFinite(b) ? `Borrows ${b.toFixed(2)} USDC. ${lev}× means every 1 USDC of yours trades as ${lev}.` : '—'}</small>
+          </div>
+        </div>
+        <div className="tk-preview" data-film="ticket-preview">
+          <dl>
+            <div>
+              <dt>Position size</dt>
+              <dd className="num">{size != null && p ? `${size.toFixed(1)} SUI · ${usd(size * p, 2)}` : '—'}</dd>
+            </div>
+            <div>
+              <dt>Entry price</dt>
+              <dd className="num">{usd(p)}</dd>
+            </div>
+            <div>
+              <dt>Liquidation price</dt>
+              <dd className="num tk-liq">{usd(liqPrice)}</dd>
+            </div>
+            <div>
+              <dt>Starting risk ratio</dt>
+              <dd className="num">
+                {ratio0 != null ? ratio0.toFixed(2) : '—'} <small>· Yojimbo's line {actsBelow.toFixed(2)}</small>
+              </dd>
+            </div>
+          </dl>
+          <p className="tk-plain" data-film="ticket-plain">
+            {liqPrice != null && p ? (
+              <>
+                If SUI falls to <b>{usd(liqPrice)}</b>, this position is liquidated: the pool sells it to repay the loan.{' '}
+                {alertPrice != null && alertPrice >= p ? (
+                  <>
+                    It starts under Yojimbo's {actsBelow.toFixed(2)} line, so Yojimbo adds collateral right after it opens.
+                  </>
+                ) : (
+                  <>
+                    Yojimbo steps in at <b>{usd(alertPrice)}</b>.
+                  </>
+                )}
+              </>
+            ) : (
+              'Reading the pool price…'
+            )}
+          </p>
+          <p className="fine">Before trading fees. 90% of the USDC buys SUI at market; the rest stays as cash.</p>
+        </div>
+      </div>
+      {problem && <p className="err-line">{problem}</p>}
+      <button className="pill pill-navy pill-lg pill-block" onClick={open} disabled={!!problem || !p || !!run?.busy} data-film="open-long">
+        {run?.busy ? 'Opening…' : 'Open long'}
+      </button>
+      {run && run.lines.length > 0 && (
+        <ul className="jrun" role="status" data-film="ticket-result">
+          {run.lines.map((l, i) => (
+            <li key={i} className={l.ok ? 'ok' : 'no'}>
+              <b>{l.label}</b> {l.text}
+              {l.digest && l.fork && (
+                <Link to={`/tx/${l.digest}`} className="ext" data-film="open-tx">
+                  Fork transaction <Arrow />
+                </Link>
+              )}
+              {l.digest && !l.fork && (
+                <a className="ext" href={`https://suiscan.xyz/mainnet/tx/${l.digest}`} target="_blank" rel="noreferrer">
+                  SuiScan <ArrowOut />
+                </a>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -2031,6 +2246,11 @@ function Gauge({ ratio: raw, noDebt, liquidation, actsBelow, tier, loading }: { 
         )}
       </div>
       {ratio != null && (
+        <p className="g-mean">
+          What it owns ÷ what it owes. At {liq.toFixed(2)} the pool sells you out.
+        </p>
+      )}
+      {ratio != null && (
         <div className="g-legend" aria-hidden="true">
           <span className="lg-liq">Liquidation</span>
           <span className="lg-alert">Alert</span>
@@ -2264,7 +2484,7 @@ function buildSteps(chrono: any[]): Step[] {
   return out;
 }
 
-function Fact({ k, v, unit }: { k: string; v: string; unit?: string }) {
+function Fact({ k, v, unit, hint }: { k: string; v: string; unit?: string; hint?: string }) {
   return (
     <div>
       <dt>{k}</dt>
@@ -2272,6 +2492,7 @@ function Fact({ k, v, unit }: { k: string; v: string; unit?: string }) {
         {v}
         {unit && <small>{unit}</small>}
       </dd>
+      {hint && <span className="fact-hint">{hint}</span>}
     </div>
   );
 }
