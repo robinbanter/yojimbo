@@ -2342,7 +2342,7 @@ function TradeTabs(props: { positionsPanel: React.ReactNode; openCount: number; 
     ...defences.map((e) => ({ at: e.at, kind: 'defence' as const, pool: (e as any).pool ?? 'SUI_USDC', side: (e as any).side ?? null, what: `Bodyguard ${e.action} ${e.amountUsdc} USDC`, fork: isForkMode('', e.outcome), digest: e.txDigest, status: e.outcome })),
   ].sort((a, b) => b.at.localeCompare(a.at));
   const T = (id: typeof tab, label: string, n?: number) => (
-    <button role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)} data-film={`tab-${id}`}>
+    <button role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)} data-film={`ttab-${id}`}>
       {label}
       {n != null && <small>{n}</small>}
     </button>
