@@ -52,7 +52,7 @@ type Status = {
   pending: string[];
 };
 type Step = { name: string; kind: string; pending: boolean; error: string; args: [string, string][]; result: [string, string][] };
-type Message = { role: 'you' | 'yojimbo' | 'error'; text: string; at: string; steps?: Step[] };
+type Message = { role: 'you' | 'yojimbo' | 'error'; text: string; at: string; steps?: Step[]; tx?: { digest: string; fork: boolean } };
 type RecentManager = { managerId: string; owner: string; pool: string; lastActivity: string; activity: string; riskRatio: number; liquidationRatio: number };
 type Cushion = { kind: 'none' } | { kind: 'at' } | { kind: 'move'; price: number; move: number; tier: 'danger' | 'watch' | 'safe' };
 type Tier = 'danger' | 'watch' | 'safe';
@@ -158,6 +158,8 @@ function App() {
   const [histError, setHistError] = useState('');
   const [botPositions, setBotPositions] = useState<BotPosition[] | null>(null);
   const [positionsError, setPositionsError] = useState('');
+  const [orders, setOrders] = useState<OrderRow[] | null>(null);
+  const loadOrders = () => api('/orders').then((v) => setOrders(v.orders), () => {});
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMin, setChatMin] = useState(false);
   const loadPositions = async () => {
@@ -174,7 +176,8 @@ function App() {
     load();
     const id = setInterval(load, 300_000);
     void loadPositions();
-    const id2 = setInterval(loadPositions, 15_000);
+    void loadOrders();
+    const id2 = setInterval(() => (void loadPositions(), void loadOrders()), 15_000);
     return () => (clearInterval(id), clearInterval(id2));
   }, []);
   useEffect(() => {
@@ -235,7 +238,24 @@ function App() {
     stream.addEventListener('notification', (e) => setNotifications((v) => [JSON.parse((e as MessageEvent).data).message, ...v].slice(0, 20)));
     stream.addEventListener('approval', (e) => setApproval(JSON.parse((e as MessageEvent).data)));
     stream.addEventListener('trace', (e) => setTrace((v) => [{ type: 'decision', ...JSON.parse((e as MessageEvent).data) }, ...v].slice(0, 30)));
-    stream.addEventListener('event', () => void refresh());
+    stream.addEventListener('event', (ev) => {
+      void refresh();
+      try {
+        const e = JSON.parse((ev as MessageEvent).data);
+        const pair = String(e.pool ?? 'SUI_USDC').replace('_', '/');
+        if (e.txDigest)
+          setMessages((v) => [
+            ...v,
+            {
+              role: 'yojimbo',
+              at: clock(),
+              text: `I just defended your ${pair} ${e.side ?? 'position'}: ${e.action} ${e.amountUsdc} USDC, risk ratio ${Number(e.beforeRatio).toFixed(3)} → ${e.afterRatio != null ? Number(e.afterRatio).toFixed(3) : '—'}. This is the transaction I signed.`,
+              tx: { digest: e.txDigest, fork: /fork/i.test(String(e.outcome)) },
+            },
+          ]);
+      } catch {}
+    });
+    stream.addEventListener('order', () => void api('/orders').then((v) => setOrders(v.orders), () => {}));
     stream.addEventListener('memory', () => void refresh());
     return () => {
       clearInterval(id);
@@ -789,7 +809,13 @@ function App() {
                   )}
               </p>
             )}
-            <PositionsPanel positions={botPositions} error={positionsError} actsBelow={actsBelow} events={events ?? []} fork={!!fork} selected={pool} onSelect={setPool} onDone={() => (void loadPositions(), void refresh())} />
+            <TradeTabs
+              openCount={(botPositions ?? []).filter((x) => x.side !== 'none').length}
+              orders={orders}
+              events={events ?? []}
+              hits={hits}
+              positionsPanel={<PositionsPanel positions={botPositions} error={positionsError} actsBelow={actsBelow} events={events ?? []} fork={!!fork} selected={pool} onSelect={setPool} onDone={() => (void loadPositions(), void refresh(), void loadOrders())} />}
+            />
             <section className="card recent-log" aria-labelledby="recent-title" data-film="recent-log">
               <div className="mini-head">
                 <h2 id="recent-title">Night log</h2>
@@ -1777,6 +1803,7 @@ function MarketBar(props: { markets: Market[] | null; pool: string; setPool: (p:
         </button>
         {open && (
           <ul className="pair-menu" role="listbox">
+            <li className="pm-note pm-head">DeepBook Margin has several pools. Only SUI/USDC trades today; the rest are coming soon, each with the reason.</li>
             {props.markets === null && <li className="pm-note">{props.marketsError ? `Markets: ${props.marketsError}` : 'Reading DeepBook margin pools…'}</li>}
             {(props.markets ?? []).map((x) => {
               const ok = x.long.supported || x.short.supported;
@@ -2080,7 +2107,7 @@ function PositionsPanel(props: { positions: BotPosition[] | null; error?: string
       {props.positions === null ? (
         props.error ? <p className="err-line">{props.error}</p> : <span className="skeleton log-skel" />
       ) : open.length === 0 ? (
-        <p className="fine">No open positions yet. Open a long or a short with the ticket.</p>
+        <div className="tempty"><b>No open positions</b><p>Open a long or a short with the ticket above.</p></div>
       ) : (
         <div className="ptable">
           <div className="ptable-head" aria-hidden="true">
@@ -2221,6 +2248,11 @@ function ChatDock(props: {
                     <div className="bubble">
                       {m.role === 'error' && <b>Error</b>}
                       <p>{m.role === 'error' ? m.text.replace(/^Error:\s*/, '') : m.text}</p>
+                      {m.tx && (
+                        <div className="bubble-tx" data-film="chat-tx">
+                          <TxLink digest={m.tx.digest} fork={m.tx.fork} />
+                        </div>
+                      )}
                     </div>
                     <time className="msg-time">
                       {m.role === 'you' ? 'You' : 'Yojimbo'} · {m.at}
@@ -2282,6 +2314,124 @@ function ToolChips({ steps }: { steps: Step[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Below the chart, like an exchange: Positions | Open orders | Order history | Bodyguard actions, always visible. */
+type OrderRow = { id: string; at: string; kind: 'create' | 'open' | 'close'; pool: string; side: string | null; detail: string; mode: string; status: string | null; txDigest: string | null };
+const isForkMode = (mode: string, outcome?: string) => mode === 'fork' || /fork/i.test(outcome ?? '');
+function TxLink({ digest, fork, film }: { digest: string | null; fork: boolean; film?: string }) {
+  if (!digest) return <span className="fine">no transaction</span>;
+  return fork ? (
+    <Link to={`/tx/${digest}`} className="ext" data-film={film}>
+      <span className="mono">{short(digest)}</span> <ForkTag /> <Arrow />
+    </Link>
+  ) : (
+    <a className="ext" href={`https://suiscan.xyz/mainnet/tx/${digest}`} target="_blank" rel="noreferrer" data-film={film}>
+      <span className="mono">{short(digest)}</span> SuiScan <ArrowOut />
+    </a>
+  );
+}
+function TradeTabs(props: { positionsPanel: React.ReactNode; openCount: number; orders: OrderRow[] | null; events: EventRow[]; hits: Hit[] }) {
+  const [tab, setTab] = useState<'pos' | 'open' | 'hist' | 'guard'>('pos');
+  const defences = props.events;
+  const history = [
+    ...(props.orders ?? []).map((o) => ({ at: o.at, kind: o.kind, pool: o.pool, side: o.side, what: o.detail, fork: isForkMode(o.mode), digest: o.txDigest, status: o.status ?? o.mode })),
+    ...defences.map((e) => ({ at: e.at, kind: 'defence' as const, pool: (e as any).pool ?? 'SUI_USDC', side: (e as any).side ?? null, what: `Bodyguard ${e.action} ${e.amountUsdc} USDC`, fork: isForkMode('', e.outcome), digest: e.txDigest, status: e.outcome })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
+  const T = (id: typeof tab, label: string, n?: number) => (
+    <button role="tab" aria-selected={tab === id} className={tab === id ? 'on' : ''} onClick={() => setTab(id)} data-film={`tab-${id}`}>
+      {label}
+      {n != null && <small>{n}</small>}
+    </button>
+  );
+  const kindWord: Record<string, string> = { create: 'Account', open: 'Open', close: 'Close', defence: 'Defence' };
+  return (
+    <section className="card ttabs" aria-label="Trading" data-film="trade-tabs">
+      <div className="ttabs-bar" role="tablist">
+        {T('pos', 'Positions', props.openCount)}
+        {T('open', 'Open orders', 0)}
+        {T('hist', 'Order history', history.length)}
+        {T('guard', 'Bodyguard actions', defences.length)}
+      </div>
+      <div className="ttabs-body">
+        {tab === 'pos' && props.positionsPanel}
+        {tab === 'open' && (
+          <div className="tempty">
+            <b>No open orders</b>
+            <p>Yojimbo trades with market orders, which fill at once, so nothing waits on the book.</p>
+          </div>
+        )}
+        {tab === 'hist' &&
+          (history.length ? (
+            <div className="hlist">
+              <div className="hrow hhead" aria-hidden="true">
+                <span>Time</span>
+                <span>Type</span>
+                <span>Market</span>
+                <span>What</span>
+                <span>Status</span>
+                <span>Transaction</span>
+              </div>
+              {history.map((h, i) => (
+                <div className="hrow" key={i} data-film="history-row">
+                  <span className="num fine">{new Date(h.at).toLocaleString()}</span>
+                  <span className={`htag k-${h.kind}`}>{kindWord[h.kind]}</span>
+                  <span>
+                    {pairName(h.pool)} {h.side && <em className={`side-tag ${h.side}`}>{h.side}</em>}
+                  </span>
+                  <span>{h.what}</span>
+                  <span className="fine">{h.status}</span>
+                  <TxLink digest={h.digest} fork={h.fork} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="tempty">
+              <b>No orders yet</b>
+              <p>Opens, closes and the bodyguard's defences land here, each with its transaction.</p>
+            </div>
+          ))}
+        {tab === 'guard' &&
+          (defences.length ? (
+            <div className="glist">
+              {defences.map((e) => {
+                const rule = e.ruleIds.map((id) => props.hits.find((h) => h.memory.id === id)).find(Boolean);
+                return (
+                  <article className="grow" key={e.id} data-film="guard-row">
+                    <div className="grow-what">
+                      <b>
+                        {e.action} {e.amountUsdc} USDC
+                      </b>
+                      <span>
+                        {pairName((e as any).pool ?? 'SUI_USDC')} {(e as any).side && <em className={`side-tag ${(e as any).side}`}>{(e as any).side}</em>}
+                      </span>
+                      <span className="fine">{new Date(e.at).toLocaleTimeString()}</span>
+                    </div>
+                    <div className="grow-ratio num">
+                      {e.beforeRatio.toFixed(3)} → <b className="gold-num">{e.afterRatio?.toFixed(3) ?? '—'}</b>
+                      <small>risk ratio before → after</small>
+                    </div>
+                    <div className="grow-rule">
+                      <q>{rule?.memory.text ?? e.ruleIds.join(', ')}</q>
+                      {rule && <BlobLink id={rule.blobId} />}
+                    </div>
+                    <div className="grow-tx">
+                      <small>Signed by the bodyguard</small>
+                      <TxLink digest={e.txDigest} fork={isForkMode('', e.outcome)} film="guard-tx" />
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="tempty">
+              <b>No bodyguard actions yet</b>
+              <p>When a position crosses your line, the defence it signs shows here with its transaction.</p>
+            </div>
+          ))}
+      </div>
+    </section>
   );
 }
 
