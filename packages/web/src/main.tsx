@@ -952,7 +952,7 @@ function App() {
                       .map((h) => (
                         <div className="forget-moment" key={h.blobId}>
                           <div className="forget-says">
-                            <span className="forget-who">You</span>
+                            <span className="forget-who">Your request, as stored</span>
                             <p>“{h.memory.text}”</p>
                             <span className="forget-meta">
                               {ago(h.memory.createdAt)} · <BlobLink id={h.blobId} />
@@ -1001,7 +1001,7 @@ function App() {
                     </div>
                   </details>
                 )}
-                {visibleDecision && (
+                {visibleDecision && visibleDecision.recalledBlobIds.length > 0 && (
                   <p className="recalled fine">
                     Last recall: {visibleDecision.recalledBlobIds.length} memories · next move {visibleDecision.action} · “{visibleDecision.quote}”
                   </p>
