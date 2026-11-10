@@ -1,0 +1,76 @@
+import { mainnetPools, mainnetMarginPools, mainnetCoins } from '@mysten/deepbook-v3';
+import { chain } from './chain.js';
+
+export type Direction = { supported: boolean; reason?: string };
+export type Market = {
+  pool: string; base: string; quote: string; enabled: boolean;
+  liquidation: number | null; minBorrow: number | null; midPrice: number | null; lotSize: number | null; minSize: number | null;
+  baseMarginPool: string | null; quoteMarginPool: string | null;
+  long: Direction; short: Direction;
+};
+const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000';
+const cache = new Map<string, { at: number; value: { markets: Market[]; notMarginEnabled: string[]; source: string; checkedAt: string } }>();
+const short = (e: unknown) => String(e instanceof Error ? e.message : e).slice(0, 160);
+
+/**
+ * Every DeepBook pool the SDK knows, checked live against the mainnet MarginRegistry (read-only simulations):
+ * whether it is margin-enabled, its liquidation and min-borrow risk ratios, and for each direction whether the
+ * asset that must be borrowed has a margin pool that allows this DeepBook pool (long borrows USDC, short borrows
+ * the base). Only USDC-quoted pools are traded, since collateral and defences are USDC. Calls run one at a time
+ * (Tatum rate-limits bursts) and the result is kept for ten minutes.
+ */
+export async function markets(env = process.env) {
+  const c = chain(ZERO, undefined, env);
+  const key = String(c.source);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < 600_000) return hit.value;
+  const db = c.client.deepbook;
+  const out: Market[] = [];
+  const notMarginEnabled: string[] = [];
+  for (const [pool, info] of Object.entries(mainnetPools) as [string, { address: string; baseCoin: string; quoteCoin: string }][]) {
+    let enabled = false;
+    try { enabled = await db.isPoolEnabledForMargin(pool); } catch { enabled = false; }
+    if (!enabled) { notMarginEnabled.push(pool); continue; }
+    const m: Market = { pool, base: info.baseCoin, quote: info.quoteCoin, enabled, liquidation: null, minBorrow: null, midPrice: null, lotSize: null, minSize: null, baseMarginPool: null, quoteMarginPool: null, long: { supported: false }, short: { supported: false } };
+    try {
+      m.liquidation = Number(await db.getLiquidationRiskRatio(pool));
+      m.minBorrow = Number(await db.getMinBorrowRiskRatio(pool));
+      m.baseMarginPool = String(await db.getBaseMarginPoolId(pool)).replace(/^0x0x/, '0x');
+      m.quoteMarginPool = String(await db.getQuoteMarginPoolId(pool)).replace(/^0x0x/, '0x');
+      const book = await db.poolBookParams(pool);
+      m.lotSize = book.lotSize; m.minSize = book.minSize;
+      try { m.midPrice = await db.midPrice(pool); } catch { m.midPrice = null; }
+    } catch (e) {
+      const reason = `Could not read this pool's margin settings: ${short(e)}`;
+      m.long = { supported: false, reason }; m.short = { supported: false, reason }; out.push(m); continue;
+    }
+    if (info.quoteCoin !== 'USDC') {
+      const reason = `Quoted in ${info.quoteCoin}, not USDC: Yojimbo's collateral and defences are USDC`;
+      m.long = { supported: false, reason }; m.short = { supported: false, reason }; out.push(m); continue;
+    }
+    m.long = await direction(db, 'USDC', info.address, m.quoteMarginPool, 'USDC', 'long');
+    m.short = await direction(db, info.baseCoin, info.address, m.baseMarginPool, info.baseCoin, 'short');
+    if (m.midPrice == null) {
+      const reason = 'The order book has no mid price right now (empty side), so a market order cannot be sized';
+      if (m.long.supported) m.long = { supported: false, reason };
+      if (m.short.supported) m.short = { supported: false, reason };
+    }
+    out.push(m);
+  }
+  const value = { markets: out, notMarginEnabled, source: String(c.source), checkedAt: new Date().toISOString() };
+  cache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+async function direction(db: any, coin: string, poolAddress: string, registered: string | null, label: string, side: 'long' | 'short'): Promise<Direction> {
+  const known = (mainnetMarginPools as Record<string, { address: string }>)[coin];
+  if (!known) return { supported: false, reason: `A ${side} borrows ${label}, and there is no ${label} margin lending pool on mainnet` };
+  if (!registered || /^0x0+$/.test(registered)) return { supported: false, reason: `The MarginRegistry has no ${label} lending pool registered for this pool, so ${label} cannot be borrowed` };
+  if (registered.toLowerCase() !== known.address.toLowerCase()) return { supported: false, reason: `The registry's ${label} lending pool ${registered} differs from the SDK's ${known.address}` };
+  try {
+    const allowed = await db.isDeepbookPoolAllowed(coin, poolAddress);
+    if (!allowed) return { supported: false, reason: `The ${label} margin pool does not allow borrowing for this DeepBook pool` };
+  } catch (e) { return { supported: false, reason: `Could not check the ${label} margin pool: ${short(e)}` }; }
+  if (!(mainnetCoins as Record<string, { priceInfoObjectId?: string }>)[coin]?.priceInfoObjectId) return { supported: false, reason: `No Pyth price object for ${coin} in the SDK, so the oracle-checked borrow cannot be built` };
+  return { supported: true };
+}

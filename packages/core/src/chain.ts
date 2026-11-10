@@ -5,6 +5,8 @@ const tatumLimit = rateLimit(400);
 import { ChannelCredentials } from '@grpc/grpc-js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { deepbook, mainnetPackageIds, mainnetCoins, mainnetPools } from '@mysten/deepbook-v3';
+import { shortSellQuantity, coverQuantity, toLots } from './sizing.js';
+export { toLots } from './sizing.js';
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { Transaction } from '@mysten/sui/transactions';
 import { bcs } from '@mysten/sui/bcs';
@@ -27,9 +29,17 @@ export function parseManagerObject(object:{objectId:string;type?:string;json?:un
   const fields=object.json as Record<string,unknown>|undefined;
   const owner=fields?.owner,pool=fields?.deepbook_pool;
   if(object.objectId.toLowerCase()!==activity.managerId||!object.type?.includes('::margin_manager::MarginManager<')||typeof owner!=='string'||typeof pool!=='string'||!addressPattern.test(owner)||!addressPattern.test(pool))return null;
-  if(pool.toLowerCase()!==SUI_USDC_POOL.toLowerCase())return null;
-  return {...activity,owner:owner.toLowerCase(),pool:POOL};
+  const poolKey=poolKeyForAddress(pool);
+  if(!poolKey)return null;
+  return {...activity,owner:owner.toLowerCase(),pool:poolKey};
 }
+/** The DeepBook pool key (e.g. SUI_USDC) for an on-chain pool address, or null if the SDK does not know it. */
+export function poolKeyForAddress(address:string):string|null{
+  const a=address.toLowerCase();
+  for(const [key,pool] of Object.entries(mainnetPools))if((pool as {address:string}).address.toLowerCase()===a)return key;
+  return null;
+}
+export function assertPoolKey(poolKey:string){if(!Object.hasOwn(mainnetPools,poolKey))throw new Error(`Unknown DeepBook pool ${poolKey}`);return poolKey;}
 export function parseManagerState<T extends {riskRatio:number;basePythPrice:string;basePythDecimals:number;quotePythPrice:string;quotePythDecimals:number;currentPrice:bigint|string;lowestTriggerAbovePrice:bigint|string;highestTriggerBelowPrice:bigint|string}>(state:T){
   const price=Number(state.basePythPrice)/10**state.basePythDecimals;
   const quotePrice=Number(state.quotePythPrice)/10**state.quotePythDecimals;
@@ -59,58 +69,83 @@ export function eventsRpc(env = process.env) {
   const url = env.YOJIMBO_EVENTS_RPC ?? 'https://fullnode.mainnet.sui.io:443';
   return { client: new SuiGrpcClient({ network: 'mainnet', baseUrl: url }), source: 'public fullnode (events; Tatum blocks ListEvents)' as const, url };
 }
-export function chain(owner: string, managerId?: string, env = process.env) {
+export function chain(owner: string, managerId?: string, env = process.env, poolKey: string = POOL) {
+  assertPoolKey(poolKey);
   const r = rpc(env);
-  const options = {address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey:POOL}} : undefined};
+  const options = {address:owner,marginManagers:managerId ? {BOT:{address:managerId,poolKey}} : undefined};
   return {...r,client:r.client.$extend(deepbook(options))};
 }
 // Pool thresholds change only by governance: read them one call at a time (Tatum rate-limits bursts of parallel
 // calls with HTTP 429) and keep them for five minutes per transport.
 const registryCache = new Map<string, { at: number; value: unknown[] }>();
-export async function registry(owner: string, env = process.env) {
-  const c=chain(owner,undefined,env);
-  const hit = registryCache.get(String(c.source));
+export async function registry(owner: string, env = process.env, poolKey: string = POOL) {
+  const c=chain(owner,undefined,env,poolKey);
+  const cacheKey=`${c.source}:${poolKey}`;
+  const hit = registryCache.get(cacheKey);
   let values = hit && Date.now() - hit.at < 300_000 ? hit.value : null;
   if (!values) {
     values = [];
-    values.push(await c.client.deepbook.isPoolEnabledForMargin(POOL));
-    values.push(await c.client.deepbook.getLiquidationRiskRatio(POOL));
-    values.push(await c.client.deepbook.getMinBorrowRiskRatio(POOL));
-    values.push(await c.client.deepbook.getMinWithdrawRiskRatio(POOL));
-    values.push(await c.client.deepbook.getBaseMarginPoolId(POOL));
-    values.push(await c.client.deepbook.getQuoteMarginPoolId(POOL));
-    registryCache.set(String(c.source), { at: Date.now(), value: values });
+    values.push(await c.client.deepbook.isPoolEnabledForMargin(poolKey));
+    values.push(await c.client.deepbook.getLiquidationRiskRatio(poolKey));
+    values.push(await c.client.deepbook.getMinBorrowRiskRatio(poolKey));
+    values.push(await c.client.deepbook.getMinWithdrawRiskRatio(poolKey));
+    values.push(await c.client.deepbook.getBaseMarginPoolId(poolKey));
+    values.push(await c.client.deepbook.getQuoteMarginPoolId(poolKey));
+    registryCache.set(cacheKey, { at: Date.now(), value: values });
   }
   const [enabled, liquidation, minBorrow, minWithdraw, basePool, quotePool] = values as any[];
-  return {enabled,liquidation,minBorrow,minWithdraw,basePool:basePool.replace(/^0x0x/,'0x'),quotePool:quotePool.replace(/^0x0x/,'0x'),packageId:mainnetPackageIds.MARGIN_PACKAGE_ID,registryId:MARGIN_REGISTRY,source:c.source};
+  return {pool:poolKey,enabled,liquidation,minBorrow,minWithdraw,basePool:basePool.replace(/^0x0x/,'0x'),quotePool:quotePool.replace(/^0x0x/,'0x'),packageId:mainnetPackageIds.MARGIN_PACKAGE_ID,registryId:MARGIN_REGISTRY,source:c.source};
 }
 export async function position(owner: string, env = process.env) {
   const base = chain(owner,undefined,env);
   const ids = env.YOJIMBO_MARGIN_MANAGER_ID ? [] : await base.client.deepbook.getMarginManagerIdsForOwner(owner);
   const managerId = env.YOJIMBO_MARGIN_MANAGER_ID || ids[0];
   if (!managerId) return {owner,managerId:null,state:null,price:null,source:base.source};
-  const c=chain(owner,managerId,env);
+  const pool=await managerPool(managerId,env);
+  const c=chain(owner,managerId,env,pool);
   const state = await c.client.deepbook.getMarginManagerState('BOT');
   const parsed=parseManagerState(state);
-  return {owner,managerId,state:parsed.state,price:parsed.price,source:c.source};
+  return {owner,managerId,pool,state:parsed.state,price:parsed.price,source:c.source};
 }
 /** sui-fork's gRPC serves object BCS but no JSON; MarginManager starts with id, owner and deepbook_pool. */
 const ManagerPrefix=bcs.struct('MarginManagerPrefix',{id:bcs.Address,owner:bcs.Address,deepbook_pool:bcs.Address});
 function managerPrefix(content?:Uint8Array|null){if(!content||content.length<96)return undefined;try{return ManagerPrefix.parse(content.slice(0,96));}catch{return undefined;}}
-export async function managerState(managerId:string,env=process.env){
+async function managerObject(managerId:string,env=process.env){
   if(!addressPattern.test(managerId))throw new Error('Invalid MarginManager ID');
   const base=rpc(env);
   const result=await base.client.core.getObject({objectId:managerId,include:{json:true,content:true}});
   const object=result.object&&{...result.object,json:result.object.json??managerPrefix(result.object.content)};
   const candidate=object&&parseManagerObject(object,{managerId:managerId.toLowerCase(),lastActivity:'',activity:'',checkpoint:null});
-  if(!candidate)throw new Error('SUI/USDC MarginManager not found');
-  const c=chain(candidate.owner,managerId,env);
+  if(!candidate)throw new Error('MarginManager not found on a known DeepBook pool');
+  return candidate;
+}
+/** The pool key a MarginManager is bound to, read from its deepbook_pool field. */
+export async function managerPool(managerId:string,env=process.env){return (await managerObject(managerId,env)).pool;}
+/** 'long' when the manager owes quote (USDC), 'short' when it owes base, else 'none'. */
+export function sideOf(state:{baseDebt:string|number;quoteDebt:string|number}):'long'|'short'|'none'{
+  if(Number(state.quoteDebt)>0)return 'long';
+  if(Number(state.baseDebt)>0)return 'short';
+  return 'none';
+}
+export async function managerState(managerId:string,env=process.env,poolKey?:string){
+  const candidate=await managerObject(managerId,env);
+  if(poolKey&&poolKey!==candidate.pool)throw new Error(`MarginManager is on ${candidate.pool}, not ${poolKey}`);
+  const c=chain(candidate.owner,managerId,env,candidate.pool);
   const state=await c.client.deepbook.getMarginManagerState('BOT');
   const parsed=parseManagerState(state);
-  return {owner:candidate.owner,managerId,state:parsed.state,price:parsed.price,quotePrice:parsed.quotePrice,source:c.source};
+  return {owner:candidate.owner,managerId,pool:candidate.pool,side:sideOf(parsed.state),state:parsed.state,price:parsed.price,quotePrice:parsed.quotePrice,source:c.source};
+}
+/** Every MarginManager the owner has, each read on its own pool. */
+export async function positions(owner:string,env=process.env){
+  const base=chain(owner,undefined,env);
+  const ids=await base.client.deepbook.getMarginManagerIdsForOwner(owner);
+  const out=[];
+  for(const id of ids)out.push(await managerState(id,env));
+  return {owner,positions:out,source:base.source};
 }
 export async function watchPosition(managerId:string,env=process.env){
-  const [p,thresholds]=await Promise.all([managerState(managerId,env),registry('0x1',env)]);
+  const p=await managerState(managerId,env);
+  const thresholds=await registry('0x1',env,p.pool);
   return {...p,thresholds};
 }
 export async function discoverRecentManagers(limit=8,env=process.env):Promise<RecentManager[]>{
@@ -157,34 +192,39 @@ async function forkWrite(owner:string,tx:Transaction,client:SuiGrpcClient,env=pr
   if(owner!==botKey(env).toSuiAddress())throw new Error('Bot wallet does not own this manager');
   return executeOnFork(client,tx,{signer:botKey(env)});
 }
-/** Floor a SUI order quantity to the pool's lot size; DeepBook aborts (order_info EOrderInvalidLotSize) otherwise. */
-export function toLots(quantity:number,lotSize:number,minSize:number){
-  if(!(lotSize>0))throw new Error('Invalid pool lot size');
-  const lots=Math.floor(quantity/lotSize+1e-9);
-  const rounded=Number((lots*lotSize).toFixed(9));
-  if(!(rounded>=minSize))throw new Error(`Order of ${quantity} SUI is below the pool minimum of ${minSize} SUI`);
-  return rounded;
-}
 export type DefenceAction = 'deposit'|'reduce'|'repay';
-export async function buildDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:{baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number},env=process.env) {
-  const c=chain(owner,managerId,env);
+type DefenceState={baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number;pool?:string};
+/**
+ * One defence transaction on the manager's own pool. deposit adds USDC collateral (works for longs and shorts);
+ * reduce buys back base for a short (base debt) or sells base for a long, and repays; repay pays quote debt for a
+ * long, or base debt from base already in the manager for a short.
+ */
+export async function buildDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:DefenceState,env=process.env) {
+  const pool=state.pool??await managerPool(managerId,env);
+  const c=chain(owner,managerId,env,pool);
+  const short=Number(state.baseDebt)>0;
   const tx = new Transaction(); tx.setSender(owner);
   if (action === 'deposit') tx.add(c.client.deepbook.marginManager.depositQuote({managerKey:'BOT',amount:amountUsdc}));
-  if (action === 'repay') tx.add(c.client.deepbook.marginManager.repayQuote('BOT',Math.min(amountUsdc,Number(state.quoteAsset),Number(state.quoteDebt))));
+  if (action === 'repay') {
+    if (short) tx.add(c.client.deepbook.marginManager.repayBase('BOT',Math.min(amountUsdc/state.price,Number(state.baseAsset),Number(state.baseDebt))));
+    else tx.add(c.client.deepbook.marginManager.repayQuote('BOT',Math.min(amountUsdc,Number(state.quoteAsset),Number(state.quoteDebt))));
+  }
   if (action === 'reduce') {
-    const isBid=Number(state.baseDebt)>0;
+    const isBid=short;
     const raw=Math.min((isBid?Number(state.baseDebt):Number(state.baseAsset))/2,amountUsdc/state.price);
-    if (!(raw > 0)) throw new Error('No SUI position available to reduce');
-    const book=await c.client.deepbook.poolBookParams(POOL);
+    if (!(raw > 0)) throw new Error(`No ${pool} position available to reduce`);
+    const book=await c.client.deepbook.poolBookParams(pool);
     const quantity=toLots(raw,book.lotSize,book.minSize);
-    tx.add(c.client.deepbook.poolProxy.placeReduceOnlyMarketOrderAndRepayLoan({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid,payWithDeep:false}));
+    tx.add(c.client.deepbook.poolProxy.placeReduceOnlyMarketOrderAndRepayLoan({poolKey:pool,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid,payWithDeep:false}));
   }
   return {tx,client:c.client};
 }
-export async function executeDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:{baseAsset:string;baseDebt:string;quoteAsset:string;quoteDebt:string;price:number},spentToday:number,env=process.env) {
+export async function executeDefence(owner:string,managerId:string,action:DefenceAction,amountUsdc:number,state:DefenceState,spentToday:number,env=process.env) {
   const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC ?? 10), daily=Number(env.YOJIMBO_DAILY_USDC ?? 30);
   if (![cap,daily,amountUsdc,spentToday].every(v=>Number.isFinite(v)&&v>=0) || cap<=0 || daily<=0 || amountUsdc<=0 || amountUsdc>cap || spentToday+amountUsdc>daily) throw new Error('Defence exceeds per-action or daily USDC cap');
-  if (action==='repay' && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
+  const short=Number(state.baseDebt)>0;
+  if (action==='repay' && !short && Math.min(Number(state.quoteAsset),Number(state.quoteDebt)) <= 0) throw new Error('No quote balance and debt to repay');
+  if (action==='repay' && short && Math.min(Number(state.baseAsset),Number(state.baseDebt)) <= 0) throw new Error('No base balance in the manager to repay the base loan');
   const {tx,client}=await buildDefence(owner,managerId,action,amountUsdc,state,env);
   if (forkUrl(env)) return forkWrite(owner,tx,client,env);
   return mainnetWrite(owner,tx,client,env);
@@ -194,54 +234,86 @@ export async function setupTransaction(owner:string,tx:Transaction,env=process.e
   if(forkUrl(env))return forkWrite(owner,tx,c.client,env);
   return mainnetWrite(owner,tx,c.client,env);
 }
-export async function createMarginManager(owner:string,env=process.env){
-  const c=chain(owner,undefined,env);const tx=new Transaction();tx.setSender(owner);tx.add(c.client.deepbook.marginManager.newMarginManager(POOL));
+export async function createMarginManager(owner:string,env=process.env,poolKey:string=POOL){
+  const c=chain(owner,undefined,env,poolKey);const tx=new Transaction();tx.setSender(owner);tx.add(c.client.deepbook.marginManager.newMarginManager(poolKey));
   return setupTransaction(owner,tx,env);
 }
-export async function openLong(owner:string,managerId:string,depositUsdc:number,borrowUsdc:number,price:number,env=process.env){
-  const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC??10);
-  if(!Number.isFinite(cap)||cap<=0||![depositUsdc,borrowUsdc,price].every(v=>Number.isFinite(v)&&v>0)||depositUsdc>cap||borrowUsdc>cap)throw new Error('Invalid amount or exceeds per-action USDC cap');
-  const c=chain(owner,managerId,env);const tx=new Transaction();tx.setSender(owner);
-  const book=await c.client.deepbook.poolBookParams(POOL);
+function perActionCap(env:NodeJS.ProcessEnv){const cap=Number(env.YOJIMBO_MAX_DEFENCE_USDC??10);if(!Number.isFinite(cap)||cap<=0)throw new Error('Invalid YOJIMBO_MAX_DEFENCE_USDC');return cap;}
+/** Long: deposit USDC, borrow USDC, market-buy base with 90% of both (floored to lots). */
+export async function openLong(owner:string,managerId:string,depositUsdc:number,borrowUsdc:number,price:number,env=process.env,poolKey:string=POOL){
+  const cap=perActionCap(env);
+  if(![depositUsdc,borrowUsdc,price].every(v=>Number.isFinite(v)&&v>0)||depositUsdc>cap||borrowUsdc>cap)throw new Error('Invalid amount or exceeds per-action USDC cap');
+  const c=chain(owner,managerId,env,poolKey);const tx=new Transaction();tx.setSender(owner);
+  const book=await c.client.deepbook.poolBookParams(poolKey);
   const quantity=toLots((depositUsdc+borrowUsdc)*0.9/price,book.lotSize,book.minSize);
   tx.add(c.client.deepbook.marginManager.depositQuote({managerKey:'BOT',amount:depositUsdc}));
   tx.add(c.client.deepbook.marginManager.borrowQuote('BOT',borrowUsdc));
-  tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid:true,payWithDeep:false}));
+  tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity,isBid:true,payWithDeep:false}));
+  return setupTransaction(owner,tx,env);
+}
+/**
+ * Short: deposit USDC collateral, borrow base from that base's margin pool, market-sell the borrowed base (99%,
+ * floored to lots; the taker fee comes out of the base). The borrowed notional is capped like a long's borrow.
+ */
+export async function openShort(owner:string,managerId:string,depositUsdc:number,borrowBase:number,price:number,env=process.env,poolKey:string=POOL){
+  const cap=perActionCap(env);
+  if(![depositUsdc,borrowBase,price].every(v=>Number.isFinite(v)&&v>0)||depositUsdc>cap)throw new Error('Invalid amount or deposit exceeds per-action USDC cap');
+  const c=chain(owner,managerId,env,poolKey);
+  const book=await c.client.deepbook.poolBookParams(poolKey);
+  const size=shortSellQuantity({borrowBase,price,lotSize:book.lotSize,minSize:book.minSize});
+  if(size.notionalUsdc>cap)throw new Error(`Borrowing ${size.borrow} base (~${size.notionalUsdc.toFixed(2)} USDC) exceeds the per-action cap of ${cap} USDC`);
+  const tx=new Transaction();tx.setSender(owner);
+  tx.add(c.client.deepbook.marginManager.depositQuote({managerKey:'BOT',amount:depositUsdc}));
+  tx.add(c.client.deepbook.marginManager.borrowBase('BOT',size.borrow));
+  tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity:size.sell,isBid:false,payWithDeep:false}));
   return setupTransaction(owner,tx,env);
 }
 /**
  * Close the bot's position and return its funds, in three gated transactions (fork: LOCAL_FORK_ONLY gate;
- * mainnet: YOJIMBO_ALLOW_MAINNET): 1. sell all whole SUI lots at market and repay the whole USDC loan;
- * 2. withdraw everything left in the manager to the bot wallet; 3. send all of the bot's USDC and its remaining
- * SUI (the gas coin, minus this transaction's gas) to `returnTo`. Each step re-reads chain state first.
+ * mainnet: YOJIMBO_ALLOW_MAINNET). Long: 1. sell all whole base lots at market and repay the whole USDC loan.
+ * Short: 1. market-buy enough base (whole lots, 2% buffer) and repay the whole base loan. Then 2. withdraw
+ * everything left in the manager to the bot wallet; 3. send all of the bot's USDC and its remaining SUI (the gas
+ * coin, minus this transaction's gas) to `returnTo`. Each step re-reads chain state first.
  */
 export async function unwindPosition(owner:string,managerId:string,returnTo:string,env=process.env){
   if(!addressPattern.test(returnTo))throw new Error('Return address must be a 0x Sui address');
+  const pool=await managerPool(managerId,env);
+  const base=pool.split('_')[0];
   const steps:{step:string;result:unknown;state?:unknown}[]=[];
   const read=async()=>{const s=(await managerState(managerId,env)).state;return {riskRatio:s.riskRatio,baseAsset:Number(s.baseAsset),quoteAsset:Number(s.quoteAsset),baseDebt:Number(s.baseDebt),quoteDebt:Number(s.quoteDebt)};};
   const ok=(r:{status:{status:string}|null;txDigest:string|null})=>r.status?.status==='success'&&r.txDigest!=null;
   let s=await read();
-  if(s.baseDebt>0)throw new Error('This unwind handles a SUI long with USDC debt; the manager has SUI debt');
-  const c=chain(owner,managerId,env);
-  const book=await c.client.deepbook.poolBookParams(POOL);
-  // Without DEEP the taker fee is paid in SUI from the manager, so sell 99% of the SUI (floored to lots); step 2 withdraws the rest.
-  const sellable=s.baseAsset*0.99;
-  if(s.quoteDebt>0||sellable>=book.minSize){
+  if(s.baseDebt>0&&s.quoteDebt>0)throw new Error('The manager owes both base and quote; unwind it by hand');
+  const c=chain(owner,managerId,env,pool);
+  const book=await c.client.deepbook.poolBookParams(pool);
+  if(s.baseDebt>0){
+    const buy=coverQuantity(s.baseDebt,s.baseAsset,book.lotSize,book.minSize);
     const tx=new Transaction();tx.setSender(owner);
-    if(sellable>=book.minSize)tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:POOL,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity:toLots(sellable,book.lotSize,book.minSize),isBid:false,payWithDeep:false}));
-    if(s.quoteDebt>0)tx.add(c.client.deepbook.marginManager.repayQuote('BOT'));
-    const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:'sell SUI lots and repay USDC loan',result:r,state:s});
+    if(buy>0)tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:pool,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity:buy,isBid:true,payWithDeep:false}));
+    tx.add(c.client.deepbook.marginManager.repayBase('BOT'));
+    const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:`buy ${buy} ${base} and repay the ${base} loan`,result:r,state:s});
     if(!ok(r))return {done:false,steps};
+    if(s.baseDebt>0)throw new Error(`${base} debt ${s.baseDebt} remains after the buy`);
+  }else{
+    // Without DEEP the taker fee is paid in base from the manager, so sell 99% of it (floored to lots); step 2 withdraws the rest.
+    const sellable=s.baseAsset*0.99;
+    if(s.quoteDebt>0||sellable>=book.minSize){
+      const tx=new Transaction();tx.setSender(owner);
+      if(sellable>=book.minSize)tx.add(c.client.deepbook.poolProxy.placeMarketOrder({poolKey:pool,marginManagerKey:'BOT',clientOrderId:String(Date.now()),quantity:toLots(sellable,book.lotSize,book.minSize),isBid:false,payWithDeep:false}));
+      if(s.quoteDebt>0)tx.add(c.client.deepbook.marginManager.repayQuote('BOT'));
+      const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:`sell ${base} lots and repay USDC loan`,result:r,state:s});
+      if(!ok(r))return {done:false,steps};
+    }
+    if(s.quoteDebt>0)throw new Error(`USDC debt ${s.quoteDebt} remains after the sell`);
   }
-  if(s.quoteDebt>0)throw new Error(`USDC debt ${s.quoteDebt} remains after the sell`);
-  const usdc=Math.floor(s.quoteAsset*1e6)/1e6,sui=Math.floor(s.baseAsset*1e9)/1e9;
-  if(usdc>0||sui>0){
+  const usdc=Math.floor(s.quoteAsset*1e6)/1e6,baseAmt=Math.floor(s.baseAsset*1e6)/1e6;
+  if(usdc>0||baseAmt>0){
     const tx=new Transaction();tx.setSender(owner);
     const coins=[];
     if(usdc>0)coins.push(tx.add(c.client.deepbook.marginManager.withdrawQuote('BOT',usdc)));
-    if(sui>0)coins.push(tx.add(c.client.deepbook.marginManager.withdrawBase('BOT',sui)));
+    if(baseAmt>0)coins.push(tx.add(c.client.deepbook.marginManager.withdrawBase('BOT',baseAmt)));
     tx.transferObjects(coins,owner);
-    const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:`withdraw ${usdc} USDC and ${sui} SUI to the bot wallet`,result:r,state:s});
+    const r=await setupTransaction(owner,tx,env);s=await read();steps.push({step:`withdraw ${usdc} USDC and ${baseAmt} ${base} to the bot wallet`,result:r,state:s});
     if(!ok(r))return {done:false,steps};
   }
   const usdcCoins=await c.client.core.listCoins({owner,coinType:USDC});
