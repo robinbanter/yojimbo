@@ -279,7 +279,9 @@ const server=createServer(async(req,res)=>{try{
  const path=new URL(req.url||'/',`http://localhost:${port}`).pathname;
  const origin=req.headers.origin;
  if(origin && !allowedOrigins.has(origin))return json(res,403,{error:'Origin not allowed'});
- if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
+ // Allowed cross-origin callers (the hosted frontend) may read responses, stream SSE and POST JSON.
+ if(origin){res.setHeader('access-control-allow-origin',origin);res.setHeader('vary','origin');}
+ if(req.method==='OPTIONS'){res.writeHead(204,{'access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'content-type','access-control-max-age':'600'});return res.end();}
  // Liveness only: no chain, memory or model calls.
  if(path==='/health')return json(res,200,{ok:true});
  if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
