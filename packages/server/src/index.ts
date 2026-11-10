@@ -136,7 +136,8 @@ async function tool(name:string,args:any,ownerAddress:string){
  throw new Error(`Unknown tool ${name}`);
 }
 function localNow(tz:string){const p=new Intl.DateTimeFormat('en-CA',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date());const g=(t:string)=>p.find(x=>x.type===t)?.value??'';return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}`;}
-const allowedOrigins=new Set(['5173','5183','5185','5186',process.env.VITE_PORT].filter(Boolean).flatMap(port=>[`http://localhost:${port}`,`http://127.0.0.1:${port}`]));
+// Local Vite ports, plus exact extra origins from YOJIMBO_ALLOWED_ORIGINS (comma-separated, e.g. the hosted https origin).
+const allowedOrigins=new Set([...['5173','5183','5185','5186',process.env.VITE_PORT].filter(Boolean).flatMap(port=>[`http://localhost:${port}`,`http://127.0.0.1:${port}`]),...(process.env.YOJIMBO_ALLOWED_ORIGINS??'').split(',').map(o=>o.trim()).filter(Boolean)]);
 const toolSchemas=[
  ['get_position','Read a DeepBook Margin position by owner address, defaulting to bot owner',{owner:{type:'string'}}],['get_risk','Read position risk and SUI/USDC margin pool thresholds; provide managerId for a watched position',{owner:{type:'string'},managerId:{type:'string'}}],['watch_position','Read live risk and deterministic decision for a MarginManager ID',{managerId:{type:'string'}}],['list_recent_managers','List recent real SUI/USDC MarginManagers with live risk ratios',{}],['create_margin_manager','Create a bot-owned SUI/USDC MarginManager, dry-run unless mainnet enabled',{}],['open_position','Deposit USDC, borrow USDC and buy SUI to open a long; dry-run unless mainnet enabled',{depositUsdc:{type:'number'},borrowUsdc:{type:'number'}}],['list_rules','Recall rules, schedules and overrides from Walrus Memory',{}],
  ['add_rule','Remember a defence rule',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},belowRatio:{type:'number'},movePercent:{type:'number'},maxUsdc:{type:'number'},alertRatio:{type:'number'},mode:{type:'string',enum:['guard-alone','ask-first']},defaultOnTimeout:{type:'string',enum:['deposit','reduce','repay','ignore']}}],
@@ -244,6 +245,8 @@ const server=createServer(async(req,res)=>{try{
  const origin=req.headers.origin;
  if(origin && !allowedOrigins.has(origin))return json(res,403,{error:'Origin not allowed'});
  if(req.method==='OPTIONS'){res.writeHead(204);return res.end();}
+ // Liveness only: no chain, memory or model calls.
+ if(path==='/health')return json(res,200,{ok:true});
  if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
  if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null,usdcBalance:string|null=null;if(address){try{const client=chain(address).client;const balances=await Promise.all([client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'}),client.core.getBalance({owner:address,coinType:'0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'})]);balance=balances[0].balance.balance;usdcBalance=balances[1].balance.balance;}catch{}}
   const forkInfo=await forkLabel();
