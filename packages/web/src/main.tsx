@@ -243,6 +243,7 @@ function App() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message: text, watchManagerId: source === 'watch' ? watchId : undefined }),
       });
+      if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `Chat failed (HTTP ${response.status})`);
       if (!response.body) throw new Error('No stream');
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
