@@ -1,0 +1,49 @@
+# Yojimbo on the hackathon VPS behind Coolify's Traefik (network "coolify"), same pattern as /opt/hk/hasami.
+# Server layout: /opt/hk/yojimbo/.env (mode 600, copied from the Mac) and /opt/hk/yojimbo/app (git archive of main).
+# Redeploy from the Mac: deploy/redeploy.sh. On the server:
+#   cd /opt/hk/yojimbo/app && flock /opt/hk/.build.lock docker compose -f deploy/docker-compose.yml up -d --build
+# DRY-RUN ONLY: YOJIMBO_ALLOW_MAINNET is forced empty below, so every defence and setup write is built and
+# dry-run, never sent. Switching to mainnet writes needs Nick's explicit yes (see grokbot/HOSTING.md, Yojimbo).
+name: yojimbo
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: hk-yojimbo:latest
+    restart: unless-stopped
+    init: true
+    mem_limit: 512m
+    memswap_limit: 768m
+    cpus: 0.5
+    env_file:
+      - path: ../../.env
+        required: true
+    environment:
+      PORT: "8787"
+      NODE_OPTIONS: --max-old-space-size=384
+      YOJIMBO_ALLOWED_ORIGINS: https://yojimbo.201-18-198-162.sslip.io
+      YOJIMBO_ALLOW_MAINNET: ""
+      YOJIMBO_MAX_DEFENCE_USDC: "3"
+      YOJIMBO_DAILY_USDC: "4"
+    volumes:
+      - yojimbo-data:/app/packages/server/data
+    networks: [coolify]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.hk-yojimbo.rule=Host(`yojimbo.201-18-198-162.sslip.io`)
+      - traefik.http.routers.hk-yojimbo.entrypoints=https
+      - traefik.http.routers.hk-yojimbo.tls=true
+      - traefik.http.routers.hk-yojimbo.tls.certresolver=letsencrypt
+      - traefik.http.services.hk-yojimbo.loadbalancer.server.port=8080
+volumes:
+  yojimbo-data:
+networks:
+  coolify:
+    external: true
