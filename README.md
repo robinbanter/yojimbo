@@ -1,26 +1,38 @@
 # Yojimbo (用心棒)
 
-**A bodyguard for a borrowed-money trade while you sleep.** If you borrow to buy SUI and the price falls far enough, the exchange sells you out (liquidation), even at 3 a.m. You tell Yojimbo your rules in plain words, such as "while I sleep, add up to 5 USDC of collateral, never close". It watches the position, remembers your rules and schedule, acts only inside the caps you set, and adjusts its next decision when you correct it.
+**A margin exchange with a bodyguard.** Trade SUI/USDC long or short with borrowed money on DeepBook Margin. If the price moves far enough against you, the exchange sells you out (liquidation), even at 3 a.m. Yojimbo's bodyguard watches the position, remembers your rules and schedule on Walrus Memory, defends only inside the caps you set, and adjusts its next decision when you correct it.
 
 Total Recall (Tatum × Walrus Memory), track **02 Smart Agents for Real Life**. Submission fields: [HACKATHON_SUBMISSION_FORM.md](HACKATHON_SUBMISSION_FORM.md). Blog post: [docs/BLOG.md](docs/BLOG.md).
 
-An AI bodyguard for a leveraged SUI/USDC DeepBook Margin position while its owner sleeps, flies, or works. It recalls the owner's schedule and rules, acts within hard limits, and changes its next decision after an owner override.
+- **The terminal** lists every DeepBook Margin pool. Only **SUI/USDC** trades; the other pools show "coming soon" with the reason, because they failed on a local fork of Sui mainnet.
+- **The bodyguard** defends from its own bot wallet within hard caps (the owner's Walrus rule caps each defence at 3 USDC). A deterministic rule engine picks every defence.
+- **Chat** is a docked panel on Claude Haiku (`claude-haiku-5-5`) with visible tool steps. It sees the selected pair and your positions. Telegram alerts go through @Yojimbo_robot.
+- **Honest status:** no mainnet transaction with real funds has been sent. The trades and defences ran on a **LOCAL FORK of Sui mainnet**; the reads and the 14 Walrus memories are real mainnet.
 
-## Status: live today vs pending keys
+## Live
+
+| What | Where |
+|---|---|
+| Web app + API, 24/7 on a VPS (**dry-run**) | https://yojimbo.201-18-198-162.sslip.io. `/api/status` on Nov 10, 14:16 UTC: `rpc: "Tatum"`, `memory: "Walrus mainnet"`, `telegram: "Telegram ready"`, chat `Claude (claude-haiku-5-5)`, `mainnetWrites: false`. Mainnet writes need Nick's yes |
+| Telegram alerts | @Yojimbo_robot |
+| Round 4 film | `videos/yojimbo/round4/yojimbo-round4.mp4` (3:14, grokbot workspace); public link after upload |
+
+## Status: live today vs pending
 
 | Piece | Today | What unblocks it |
 |---|---|---|
-| Tatum gRPC reads on Sui mainnet (registry, pool thresholds, MarginManager state, Pyth prices) | **Live.** `pnpm test:live` with `TATUM_API_KEY` reported `source: "Tatum"` on Nov 9 2026 (table below) | – |
+| Tatum gRPC reads on Sui mainnet (registry, every margin pool, MarginManager state, Pyth prices) | **Live.** The hosted server reports `rpc: "Tatum"`; `pnpm test:live` reported `source: "Tatum"` on Nov 9 | – |
 | Recent-manager event list | Live, but through the **public Sui fullnode**, because Tatum's gateway refuses `LedgerService/ListEvents` | – |
-| Watch mode, liquidation cushion, rule engine, dry-run refusal for positions Yojimbo does not own | Live, read-only | – |
-| Full lifecycle: fund, create manager, open, watcher defence, unwind | Proven on a **LOCAL FORK of Sui mainnet** only (real Move execution, fork-only keys, no real funds) | – |
-| Rules on the fork | From the local file `docs/fork-rules.json`, labelled `local-file:` in the app. **Not Walrus Memory** | – |
-| Walrus Memory on mainnet | **Live: 14 memories** in `yojimbo-v1:0x923d5acc…556f` (Nov 10, 01:15 UTC, counted from the relayer's namespace list). The owner told the chat agent their rules and schedules, and each tool call stored one memory. Five were stored wrong at first (dated 2025, "weekends" stored as every day, invented caps), so the owner asked the agent to forget them: that is a `retire` memory, and the five were stored again correctly. Logs: `runs/total-recall/yojimbo-chat-20261110-*` in the workspace | Chat agent tools `add_rule`, `add_schedule`, `forget_memories` |
-| Mainnet transactions through Tatum (create, open, defence, unwind) | **PENDING.** None sent yet. The mainnet bot wallet exists, `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f`, and is unfunded | Nick: hub funding (40 USDC + 2.5 SUI to `0xf5887bcf…1f11`), then the bot wallet is funded from the hub (see the grokbot `MAINNET-RUNBOOK.md`) |
-| Chat agent | Works on a free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`). It hits rate limits, and a second answer took about 80 s in testing. The shared free key hit its daily cap ("free-models-per-day") at 15:41 UTC on Nov 9 | The daily reset at 00:00 UTC; optional OpenRouter credit |
-| Telegram alerts | **Live** (Nov 9): the bot @Yojimbo_robot is connected to the owner's chat. Alerts go out before any defence, and a reply in Telegram is parsed into an override memory. Fork test alerts are labelled `[LOCAL FORK test · no real funds]` | – |
-| Public repo | **PENDING** | Nick makes the repo public |
-| Tatum account ID (form), published blog and post | **PENDING** | Nick |
+| Margin terminal: every DeepBook Margin pool listed, SUI/USDC long and short | **SUI/USDC only.** The other pools are "coming soon" with the fork finding (`2294651`) | Each pool passing the fork test |
+| Full lifecycle: fund, open long or short, watcher defence, unwind | Proven on a **LOCAL FORK of Sui mainnet** only (real Move execution, fork-only keys, no real funds). Round 4 (checkpoint 343730776): short 2× defended 2.006 → 2.509 (+3 USDC, fork digest `DusobxFo9bXgxchBcSDZUC3MpyFtZEURLAwuaTq1qXmR`); long 1.5× defended 3.0 → 4.0 (+3 USDC, `HWCZve2p2oaQAqRMGAd3GDf9b3b3WQLLB37fpMXJxsbg`). Not on Suiscan | – |
+| Rules on the fork | The owner's real Walrus mainnet memories, recalled **read-only**; Walrus writes are refused on the fork (`b1ee7fd`). Earlier fork runs used `docs/fork-rules.json` | – |
+| Walrus Memory on mainnet | **Live: 14 memories** in `yojimbo-v1:0x923d5acc…556f` (Nov 10, 01:15 UTC, counted from the relayer's namespace list), including one "forget" (retire) memory. Each was stored by a chat-agent tool call | – |
+| Mainnet transactions through Tatum (create, open, defence, unwind) | **PENDING.** None sent. The bot wallet `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f` holds 0 SUI and 0 USDC | Nick's yes to use real funds |
+| Chat agent | **Live** on Claude Haiku (`claude-haiku-5-5`) with tool steps and the app's screen context (`3e1466e`, `2497911`). OpenRouter's free model is the fallback without an Anthropic key | – |
+| Telegram alerts | **Live** on @Yojimbo_robot. Alerts go out before any defence, and a reply is parsed into an override memory. Fork test alerts are labelled `[LOCAL FORK test · no real funds]` | – |
+| Tests | `pnpm test`: **25 passing** (Nov 10) | – |
+| Public repo | **PENDING**: private as of Nov 10, 14:20 UTC | Nick flips it to public |
+| Film link, social post | **PENDING** | Nick uploads and posts |
 
 ## Try it
 
@@ -79,17 +91,17 @@ No mainnet transaction digest exists yet. Mainnet Suiscan links will be added he
 | Account ID (public, on chain) | `0xd2ca3cbe1bd663a5fe7df7c14590451bbc712255cfee59966b0b8413cdaa335a`, owner `0x0cff6ac3b0396c3b449de58472dcf9cfd55f0bb2aefaca92c43315de128c7e93` |
 | How it was found | On chain, not from a dashboard. The relayer's `GET https://relayer.memory.walrus.xyz/config` gives package `0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5`. Its `account::DelegateKeyAdded` events list Yojimbo's delegate key (label "Web App") under that account |
 | Delegate key | Yojimbo signs with its own delegate key. `POST /api/stats` on the mainnet relayer returned the owner above |
-| Memories stored | **0 so far.** PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC |
+| Memories stored | **14** in `yojimbo-v1:0x923d5acc…556f` (Nov 10, 01:15 UTC), counted from the relayer's namespace list |
 | Write wait | Mainnet blobs took over 60 s to certify, so each write now waits up to 300 s (`a63b4b2`) |
 
 The memory count here will be the real count from the relayer, not an estimate.
 
 ## Films (not public yet)
 
-- `videos/yojimbo/yojimbo-fork-film-v1.mp4` (1:52): fund, open and defence on the LOCAL FORK, with a fork badge in every shot. Link: **PENDING upload**.
-- `yojimbo-film-v3.mp4` (1:41): mainnet watch mode, the chat agent, and the phone layout. Its reads use the public Sui node and say so on screen; Walrus Memory shows **Setup required**. Link: **PENDING upload**.
+- `videos/yojimbo/round4/yojimbo-round4.mp4` (3:14): the margin terminal, a short and a long on the LOCAL FORK, both defended, the docked Claude chat, the unwind and the night log. Link: **PENDING upload**.
+- Earlier cuts: `yojimbo-fork-film-v1.mp4` (1:52, fork lifecycle) and `yojimbo-film-v3.mp4` (1:41, mainnet watch mode).
 
-Both live in the grokbot `videos/yojimbo/` folder, not in this repo.
+All live in the grokbot `videos/yojimbo/` folder, not in this repo.
 
 ## Custody and chain version
 

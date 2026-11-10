@@ -43,6 +43,10 @@ Yojimbo doesn't train a model. By design, it learns the way a good bodyguard doe
 
 What exists today is a rehearsal. On a local fork of Sui mainnet, with real Move execution and no real money, Yojimbo funded its bot wallet, opened a position (deposit 10 USDC, borrow 5), and defended it on its own with a 5 USDC deposit. The risk ratio rose from 2.999 to 3.999. It then unwound the position and returned 19.82 of the 20 USDC. On the fork, the rule came from a local file, not from Walrus Memory. The fork proves the transactions and the decision logic, but not the memory. The memory loop on mainnet starts with the first rules after the November 10 reset. Until then, nothing here claims that Yojimbo has learned from Walrus.
 
+## What changed on Nov 10
+
+Yojimbo is now a margin exchange with a bodyguard. The terminal lists every DeepBook Margin pool, but only SUI/USDC trades; the others say "coming soon" because they failed on the fork. You can go long or short, and the bodyguard defends either side within the owner's caps, using the 14 rules and schedules stored on Walrus mainnet (including the "forget" memory). Chat is a panel docked beside the terminal, runs on Claude Haiku with its tool steps on screen, and sees the selected pair and your positions; alerts go through @Yojimbo_robot on Telegram. On a local fork of Sui mainnet, with no real money, a short at 2× was defended from a risk ratio of 2.006 to 2.509 and a long at 1.5× from 3.0 to 4.0, each with 3 USDC. The app now runs 24/7 at https://yojimbo.201-18-198-162.sslip.io in dry-run: real mainnet reads through Tatum and real Walrus memories, but no mainnet transaction with real funds has been sent yet.
+
 ## What's next
 
 1. After the OpenRouter reset, write at least ten memories to mainnet through the chat agent: the rules, the schedule, defence events and an override.

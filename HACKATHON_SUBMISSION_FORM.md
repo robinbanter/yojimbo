@@ -12,23 +12,23 @@ Yojimbo (用心棒)
 
 ## One-liner
 
-An AI bodyguard for your leveraged SUI trade: it remembers your rules and sleep schedule on Walrus Memory, watches the position through Tatum, and defends it within your caps while you sleep.
+A margin exchange with a bodyguard: trade SUI/USDC long or short on DeepBook Margin, and an AI bodyguard that remembers your rules on Walrus Memory defends the position within your caps while you sleep.
 
 ## Description
 
-Leverage never sleeps. A DeepBook Margin position on Sui can be liquidated at 3 a.m. while its owner is asleep or on a plane. Yojimbo guards one SUI/USDC margin position from its own dedicated bot wallet.
+Leverage never sleeps. A DeepBook Margin position on Sui can be liquidated at 3 a.m. while its owner is asleep or on a plane. Yojimbo is a margin exchange with a bodyguard built in.
 
-The owner talks to it in plain words: "I sleep from one to eight; add up to 5 USDC of collateral, never close." Yojimbo stores that as a rule and a schedule. A watcher reads the position and the SUI oracle price every 15 seconds. When the risk ratio crosses the owner's line, a deterministic rule engine decides what to do. It works out which mode applies now (guard alone, or ask first), applies the newest matching owner override, and acts only within per-action and daily USDC caps. A defence is a collateral deposit, a reduce-only sale with loan repayment, or a repayment from spare USDC. Each defence is recorded with the ratio before and after, the price, the mode, the rule IDs and the transaction digest. When the owner corrects a decision ("next time, ask me first"), that override is remembered, and the next similar decision quotes it.
+The terminal lists every DeepBook Margin pool. Only SUI/USDC trades today: the other pools are marked "coming soon", with the reason, because they failed on a local fork of Sui mainnet. On SUI/USDC you can go long or short. The bodyguard guards the position from its own dedicated bot wallet.
 
-Watch mode works without any wallet. It lists real SUI/USDC margin positions on mainnet, closest to liquidation first, and shows how far SUI can fall before each one is liquidated. The figure is solved from the position's own balances and Pyth prices and reproduces the chain's risk ratio to 1e-6.
+The owner tells it in plain words when they sleep or fly, how much it may spend per defence, and to add collateral rather than close. Yojimbo stores each of those as a rule or a schedule on Walrus Memory. A watcher reads the position and the SUI oracle price every 15 seconds. When the risk ratio crosses the owner's line, a deterministic rule engine decides what to do. It works out which mode applies now (guard alone, or ask first), applies the newest matching owner override, and acts only within per-action and daily USDC caps. The tightest cap any remembered rule names limits every defence. A defence is a collateral deposit, a reduce-only trade with loan repayment, or a repayment from spare USDC. Each one is recorded with the ratio before and after, the price, the mode, the rule IDs and the transaction digest.
 
-The chat agent's tool calls stream into the UI as it works. The language model writes messages and parses intent; it never picks the defence. That is done by the rule engine, which has unit tests.
+Chat is a panel docked beside the terminal. It runs on Claude Haiku (`claude-haiku-5-5`), its tool steps show as it works, and it sees the selected pair and your positions. The model writes messages and parses intent; it never picks the defence. Telegram alerts go out through @Yojimbo_robot, and a reply there becomes an override memory.
 
 **Status, stated plainly:**
-- Live on Sui mainnet today: read-only watch mode, with reads through Tatum's gRPC gateway.
-- Proven end to end on a **local fork of Sui mainnet**, with real Move execution and no real funds: fund, open, defence (risk ratio 2.999 → 3.999) and unwind (19.82 of 20 USDC returned). On the fork, rules come from a local file, not Walrus Memory.
-- **Walrus Memory on mainnet is live: 14 memories** in `yojimbo-v1:0x923d5acc…556f` (Nov 10). The owner's rules and schedules (asleep 01:00–08:00 IST, recording today, flying Nov 12, weekends, a 3 USDC cap per defence, add collateral rather than close) were each stored by a chat-agent tool call, then recalled when the agent was asked what it remembers.
-- **PENDING:** the first mainnet transaction. The bot wallet `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f` exists and is unfunded, waiting for hub funding.
+- **Hosted 24/7** at https://yojimbo.201-18-198-162.sslip.io in **dry-run**: live Sui mainnet reads through Tatum, Walrus Memory on mainnet, Claude chat and Telegram ready. Mainnet writes are off (`mainnetWrites: false`) and need Nick's yes.
+- **Walrus Memory on mainnet: 14 memories** in `yojimbo-v1:0x923d5acc…556f`, including a "forget" (retire) memory.
+- **Proven on a LOCAL FORK of Sui mainnet** (checkpoint 343730776, real Move execution, no real funds), with the owner's Walrus rules recalled read-only: a short at 2× defended with 3 USDC (risk ratio 2.006 → 2.509), then a long at 1.5× defended with 3 USDC (3.0 → 4.0), and an unwind with no debt left.
+- **PENDING:** any mainnet transaction with real funds. None has been sent. The bot wallet `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f` holds 0 SUI and 0 USDC.
 
 ## How it uses Walrus Memory
 
@@ -42,14 +42,15 @@ Each bot wallet gets its own namespace, `yojimbo-v1:<bot address>`, through the 
 
 Before every decision, the watcher recalls schedules, rules and overrides by semantic query. Each decision shows the blob IDs it recalled. If memory is unavailable, or no recalled rule allows an action, Yojimbo does not defend. It fails closed and says **Setup required: Walrus Memory**.
 
-**Status: 14 memories on Walrus mainnet** (Nov 10, 01:15 UTC), all written through the chat agent's tools. The first pass exposed real agent mistakes: it dated one-time windows 2025, stored "weekends" as every day, and invented caps of 10,000 and 1,000,000 USDC for rules that named no amount. We fixed the agent (`d04e38e`): it now gets today's date, has a `weekends` schedule, refuses a cap above the hard limit and a window that has already ended, and ignores 0 for any threshold the owner never stated. Then the owner told it to forget the five wrong memories (one `retire` memory) and stored them again correctly. The funded mainnet run then adds the defence event, an owner override and the daily summary. Mainnet blobs took over 60 s to certify, so each write waits up to 300 s. We will report the real count from the relayer, not an estimate.
+**Status: 14 memories on Walrus mainnet** (Nov 10, 01:15 UTC), all written through the chat agent's tools, including one retire memory. The first pass exposed real agent mistakes: it dated one-time windows 2025, stored "weekends" as every day, and invented caps of 10,000 and 1,000,000 USDC for rules that named no amount. We fixed the agent (`d04e38e`): it now gets today's date, has a `weekends` schedule, refuses a cap above the hard limit and a window that has already ended, and ignores 0 for any threshold the owner never stated. Then the owner told it to forget the five wrong memories (one `retire` memory) and stored them again correctly. On the LOCAL FORK, the server recalls these mainnet memories read-only and refuses Walrus writes, so the fork defences wrote no event memories. A mainnet run with real funds would add the defence event, an owner override and the daily summary; it is **PENDING**. Mainnet blobs took over 60 s to certify, so each write waits up to 300 s. We will report the real count from the relayer, not an estimate.
 
 ## How it uses Tatum
 
 All Sui reads and transactions go through **Tatum's Sui gRPC gateway** (`sui-mainnet-grpc.gateway.tatum.io:443`, TLS, `x-api-key` metadata). Yojimbo builds a `SuiGrpcClient` from `@mysten/sui` over `@grpc/grpc-js`, with a process-wide limiter for Tatum's free plan (3 requests a second, with backoff on HTTP 429).
 
 - **Reads (live):** the DeepBook margin registry and pool thresholds, MarginManager balances and debt, and Pyth SUI and USDC price objects. On Nov 9 2026, `pnpm test:live` reported `source: "Tatum"`, margin package v8, liquidation ratio 1.1, and live risk ratios for 5 recent SUI/USDC managers. One exception: Tatum's gateway refuses `LedgerService/ListEvents`, so the recent-manager event list uses the public Sui fullnode. Every other read goes through Tatum.
-- **Transactions (PENDING on mainnet):** creating the margin manager, opening the position, every defence and the unwind are simulated first, then signed by the bot wallet and sent through Tatum. A send happens only with `YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS`. No mainnet transaction has been sent yet; it needs Nick's hub funding (40 USDC + 2.5 SUI to `0xf5887bcfaa178fbcc29f560afce15734e13989955100f9a6b6154c34a79c1f11`).
+- **Transactions (PENDING on mainnet):** creating the margin manager, opening the position, every defence and the unwind are simulated first, then signed by the bot wallet and sent through Tatum. A send happens only with `YOJIMBO_ALLOW_MAINNET=I_ACKNOWLEDGE_REAL_FUNDS`. No mainnet transaction has been sent; a real-funds run needs Nick's yes. The hosted server answers `/status` with `rpc: "Tatum"` and `mainnetWrites: false` (checked Nov 10, 14:16 UTC).
+- **Markets scan:** the terminal's pool list reads every DeepBook Margin pool through Tatum and retries rate-limited reads, so a Tatum 429 no longer marks SUI/USDC unsupported (`42d8cbd`).
 
 ## Tech stack
 
@@ -57,20 +58,19 @@ All Sui reads and transactions go through **Tatum's Sui gRPC gateway** (`sui-mai
 - Sui: `@mysten/sui` 2.39, `@mysten/deepbook-v3` 2.11.1 (DeepBook Margin v8), Pyth price objects.
 - Tatum Sui gRPC gateway through `@grpc/grpc-js` and `@protobuf-ts/grpc-transport`.
 - Walrus Memory: `@mysten-incubation/memwal` 0.1.13.
-- Chat: OpenRouter tool calls; default free model `nvidia/nemotron-3-ultra-550b-a55b:free`.
+- Chat: Claude Haiku (`claude-haiku-5-5`) tool calls when `ANTHROPIC_API_KEY` is set (`3e1466e`); OpenRouter (`nvidia/nemotron-3-ultra-550b-a55b:free`) stays the fallback.
+- Deploy: Docker image (server + built web behind nginx), Traefik on a VPS, dry-run caps.
 - Telegram alerts and replies, live on @Yojimbo_robot: the owner hears first, and a reply becomes an override memory on Walrus.
 - Local fork: `sui-fork` from the official Sui release `mainnet-v1.83.1`.
-- Tests: `pnpm test`, 14 passing (node:test via tsx), plus `pnpm test:live` against mainnet.
+- Tests: `pnpm test`, 25 passing (node:test via tsx, run Nov 10), plus `pnpm test:live` against mainnet.
 
 ## Repository
 
-https://github.com/nickthelegend/yojimbo (secret scan passed Nov 10; Nick approved making it public, flipped to public before submitting).
+https://github.com/nickthelegend/yojimbo (secret scan passed Nov 10; Nick approved making it public. **Still private as of Nov 10, 14:20 UTC**: flip to public before submitting).
 
 ## Demo video
 
-- Fork film, `yojimbo-fork-film-v1.mp4` (1:52): fund, open and defence on the local fork, with a fork badge in every shot. Link: **PENDING upload (Nick fills)**.
-- Watch-mode film, `yojimbo-film-v3.mp4` (1:41): mainnet watch mode, chat agent and phone layout. Its reads use the public Sui node and are labelled on screen. Link: **PENDING upload (Nick fills)**.
-- A mainnet film with Walrus Memory and a funded defence is planned after the first rules are written and the hub is funded.
+- Round 4 film, `videos/yojimbo/round4/yojimbo-round4.mp4` (3:14): the margin terminal, a short and a long on the LOCAL FORK, both defended by the bodyguard, the docked Claude chat explaining the position, the unwind and the night log. Every fork scene carries a LOCAL FORK badge. Fork digests are in `videos/yojimbo/round4/JUDGE.md` (workspace). Link: **Nick fills** (Drive).
 
 ## Tatum account ID
 
@@ -99,5 +99,5 @@ Nick (Nivesh Gajengi), GitHub `nickthelegend`. Solo.
 - **Claude (Anthropic)** and **Codex (OpenAI):** coding agents that wrote most of the code and docs under Nick's direction and review.
 - **ChatGPT image generation:** the product art (prompts in `docs/ART.md`).
 - **Chatterbox:** text-to-speech for the film voice-over.
-- **OpenRouter, free model** (`nvidia/nemotron-3-ultra-550b-a55b:free`): the in-app chat agent. It is rate-limited on the free tier, so answers can be slow or refused with a readable 429 message.
+- **Claude Haiku** (`claude-haiku-5-5`, Anthropic): the in-app chat agent on the hosted server. A free OpenRouter model (`nvidia/nemotron-3-ultra-550b-a55b:free`) is the fallback when no Anthropic key is set.
 - The defence decision itself is deterministic code, not a language model.
