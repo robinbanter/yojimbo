@@ -151,6 +151,46 @@ function App() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [quote, setQuote] = useState<{ midPrice: number; lotSize: number; minSize: number; source: string } | null>(null);
   const [quoteError, setQuoteError] = useState('');
+  const [markets, setMarkets] = useState<Market[] | null>(null);
+  const [marketsError, setMarketsError] = useState('');
+  const [pool, setPool] = useState('SUI_USDC');
+  const [hist, setHist] = useState<{ pool: string; candles: Candle[]; change24h: number | null } | null>(null);
+  const [histError, setHistError] = useState('');
+  const [botPositions, setBotPositions] = useState<BotPosition[] | null>(null);
+  const [positionsError, setPositionsError] = useState('');
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMin, setChatMin] = useState(false);
+  const loadPositions = async () => {
+    try {
+      const v = await api('/positions');
+      setBotPositions(v.positions);
+      setPositionsError(v.setup ?? '');
+    } catch (e) {
+      setPositionsError(String((e as Error).message ?? e));
+    }
+  };
+  useEffect(() => {
+    const load = () => api('/markets').then((v) => (setMarkets(v.markets), setMarketsError('')), (e) => setMarketsError(String((e as Error).message ?? e)));
+    load();
+    const id = setInterval(load, 300_000);
+    void loadPositions();
+    const id2 = setInterval(loadPositions, 15_000);
+    return () => (clearInterval(id), clearInterval(id2));
+  }, []);
+  useEffect(() => {
+    let dead = false;
+    const load = () =>
+      api(`/history?pool=${pool}&interval=1h&limit=168`).then(
+        (v) => !dead && (setHist({ pool, candles: v.candles, change24h: v.change24h ?? null }), setHistError('')),
+        (e) => !dead && setHistError(String((e as Error).message ?? e)),
+      );
+    load();
+    const id = setInterval(load, 60_000);
+    return () => ((dead = true), clearInterval(id));
+  }, [pool]);
+  useEffect(() => {
+    document.body.classList.toggle('dock-open', chatOpen && !chatMin);
+  }, [chatOpen, chatMin]);
   const [opened, setOpened] = useState<{ label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[]>([]);
   const [tick, setTick] = useState(() => Date.now());
   const [botWatched, setBotWatched] = useState<any>(null);
@@ -203,11 +243,11 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    const load = () => api('/quote').then((q) => (setQuote(q), setQuoteError('')), (e) => setQuoteError(String((e as Error).message ?? e)));
+    const load = () => api(`/quote?pool=${pool}`).then((q) => (setQuote(q), setQuoteError('')), (e) => setQuoteError(String((e as Error).message ?? e)));
     load();
     const id = setInterval(load, 15_000);
     return () => clearInterval(id);
-  }, []);
+  }, [pool]);
   useEffect(() => {
     const id = setInterval(() => setTick(Date.now()), 1000);
     return () => clearInterval(id);
@@ -279,7 +319,17 @@ function App() {
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: text, watchManagerId: source === 'watch' ? watchId : undefined }),
+        body: JSON.stringify({
+          message: text,
+          context: {
+            selectedPair: pool.replace('_', '/'),
+            priceNow: quote?.midPrice ?? null,
+            yojimboActsBelowRiskRatio: actsBelow,
+            positions: (botPositions ?? [])
+              .filter((x) => x.side !== 'none')
+              .map((x) => ({ pair: x.pool.replace('_', '/'), side: x.side, riskRatio: x.riskRatio, liquidationPrice: x.liquidationPrice?.price ?? null, collateral: x.state.baseAsset, cash: x.state.quoteAsset, baseDebt: x.state.baseDebt, quoteDebt: x.state.quoteDebt })),
+          },
+        }),
       });
       if (!response.ok) throw new Error(((await response.json().catch(() => ({}))) as { error?: string }).error ?? `Chat failed (HTTP ${response.status})`);
       if (!response.body) throw new Error('No stream');
@@ -432,10 +482,10 @@ function App() {
   const localRuleIds = (visibleDecision?.recalledBlobIds ?? []).filter((id) => id.startsWith('local-file:'));
   const localRules = !!fork && (hits.some((h) => h.blobId.startsWith('local-file:')) || localRuleIds.length > 0);
   const toChat = (preset?: string) => {
-    if (route !== 'app') go('/app#chat');
-    else document.getElementById('chat')?.scrollIntoView({ behavior: RM() ? 'auto' : 'smooth', block: 'center' });
+    setChatOpen(true);
+    setChatMin(false);
     if (preset) void send(preset);
-    else setTimeout(() => (document.querySelector('.composer input') as HTMLInputElement | null)?.focus({ preventScroll: true }), 50);
+    else setTimeout(() => (document.querySelector('.dock .composer input') as HTMLInputElement | null)?.focus({ preventScroll: true }), 80);
   };
   const steps4 = journeySteps(status, position, kept.length || (localRules ? localRuleIds.length || 1 : 0), memorySetup && !localRules, writesLive);
   const journey = (variant: 'panel' | 'inline') => (
@@ -522,6 +572,17 @@ function App() {
     .sort((a, b) => String(b.memory.createdAt).localeCompare(String(a.memory.createdAt)))
     .slice(0, 4);
 
+  const selMarket = markets?.find((m) => m.pool === pool);
+  const selPos = botPositions?.find((x) => x.pool === pool);
+  const posTier: Tier = selPos?.liquidationPrice ? (Math.abs(selPos.liquidationPrice.movePercent) < 3 ? 'danger' : Math.abs(selPos.liquidationPrice.movePercent) < 10 ? 'watch' : 'safe') : 'safe';
+  const chartLines: { price: number; title: string; color: string }[] = [];
+  if (selPos && selPos.side !== 'none') {
+    const st = { base: Number(selPos.state.baseAsset), quote: Number(selPos.state.quoteAsset), baseDebt: Number(selPos.state.baseDebt), quoteDebt: Number(selPos.state.quoteDebt) };
+    const yo = liqPriceOf(st, actsBelow);
+    if (selPos.liquidationPrice) chartLines.push({ price: selPos.liquidationPrice.price, title: 'Liquidation', color: '#c8361f' });
+    if (yo) chartLines.push({ price: yo, title: 'Yojimbo steps in', color: '#a06a00' });
+  }
+  const dockStarters = [`Explain my ${pool.replace('_', '/')} position`, 'What margin limit would you suggest here?', 'What rules do you remember for me?'];
   // The cap a defence would use now, as the engine applies it: the server's per-defence cap and the tightest
   // cap any remembered rule names.
   const capNow = Math.min(caps?.perActionUsdc ?? Infinity, tightestCap);
@@ -617,44 +678,104 @@ function App() {
         )}
 
         {route === 'app' && (
-          <div className="page page-guard">
-            {/* What Yojimbo does, in three plain steps; wallet and rule setup stay in a drawer. */}
-            <div className="explain-wrap" data-film="setup">
-              <ol className="explain" data-film="explain">
-                <li className={steps3[1] === 'done' ? 'done' : ''}>
-                  <b>1</b>
-                  <span>
-                    <strong>You open a borrowed-money trade.</strong> Your USDC plus a loan buys SUI.
+          <div className="page page-term">
+            <ol className="explain explain-slim" data-film="explain">
+              <li>
+                <b>1</b>
+                <span>
+                  <strong>You open a borrowed-money trade,</strong> long or short.
+                </span>
+              </li>
+              <li>
+                <b>2</b>
+                <span>
+                  <strong>You tell Yojimbo your hours and limits</strong> in chat.
+                </span>
+              </li>
+              <li>
+                <b>3</b>
+                <span>
+                  <strong>While you sleep it watches the liquidation line,</strong> adds money first, then texts you.
+                </span>
+              </li>
+            </ol>
+            <MarketBar
+              markets={markets}
+              pool={pool}
+              setPool={setPool}
+              price={quote?.midPrice ?? selMarket?.midPrice ?? null}
+              change24h={hist?.pool === pool ? hist.change24h : null}
+              source={fork ? 'LOCAL FORK of Sui mainnet · prices from the fork' : `Sui mainnet · ${quote?.source ?? '…'}`}
+              liquidation={selMarket?.liquidation ?? registry?.liquidation}
+              marketsError={marketsError}
+            />
+            <div className="term-grid">
+              <section className="card chart-card" aria-label="Price chart">
+                <div className="chart-head">
+                  <b>{pairName(pool)}</b>
+                  <span>1 h candles · DeepBook indexer (mainnet){histError ? ` · ${histError}` : ''}</span>
+                  <span className="chart-legend">
+                    {selPos && selPos.side !== 'none' && (
+                      <>
+                        <i className="lg-liq" /> liquidation <i className="lg-yoj" /> Yojimbo steps in
+                      </>
+                    )}
                   </span>
-                </li>
-                <li className={steps3[2] === 'done' ? 'done' : ''}>
-                  <b>2</b>
-                  <span>
-                    <strong>You tell Yojimbo your hours and limits</strong> in chat. It keeps them on Walrus.
-                  </span>
-                </li>
-                <li>
-                  <b>3</b>
-                  <span>
-                    <strong>While you sleep, it watches the liquidation line</strong> and adds money before you lose everything, then texts you.
-                  </span>
-                </li>
-              </ol>
-              <button className="link-btn" aria-expanded={setupOpen} aria-controls="setup-drawer" onClick={() => setSetupOpen((v) => !v)}>
-                {setupOpen ? 'Hide wallet and setup' : 'Wallet and setup'}
-              </button>
-            </div>
-            {setupOpen && (
-              <section className="card setup-drawer" id="setup-drawer" aria-label="Set up">
-                {journey('panel')}
+                </div>
+                <PriceChart candles={hist?.pool === pool ? hist.candles : null} price={quote?.midPrice ?? null} lines={chartLines} />
               </section>
-            )}
-
-            {status?.wallet && position && !hasDebt && (
-              <Ticket quote={quote} quoteError={quoteError} status={status} registry={registry} actsBelow={actsBelow} caps={caps} hasManager={!!position?.managerId} onDone={() => void refresh()} onOpened={setOpened} />
-            )}
-
-            {hasDebt && opened.some((l) => l.digest) && (
+              <div className="term-side">
+                {selPos && selPos.side !== 'none' ? (
+                  <section className={`card guard-card is-${posTier}`} id="position" aria-labelledby="guard-title" data-film="position">
+                    <div className="gc-head">
+                      <TokenLogo sym={pool.split('_')[0]} size={30} />
+                      <div>
+                        <p className="lbl">Your {selPos.side} · {pairName(pool)}</p>
+                        <h2 id="guard-title" className={`gh-word g-${posTier === 'safe' ? 'ok' : 'warn'}`} data-film="protection">
+                          {selPos.decision && selPos.decision.action !== 'ignore' ? 'Defending' : 'Guarding'}
+                        </h2>
+                      </div>
+                      <figure className="gc-art">
+                        <img src={(selPos.riskRatio ?? 99) <= actsBelow ? POSE.alert.src : POSE.seated.src} alt="" width={768} height={768} />
+                      </figure>
+                    </div>
+                    <Gauge ratio={selPos.riskRatio} noDebt={false} liquidation={selPos.liquidation.ratio} actsBelow={actsBelow} tier={posTier} loading={false} />
+                    <p className="gh-status" data-film="status-line">
+                      {statusParts.join(' · ')}
+                    </p>
+                    <p className="gh-beat" data-film="heartbeat">
+                      <span className={`beat ${status?.watcherCheckedAt ? 'on' : ''}`} aria-hidden="true" />
+                      {status?.watcherCheckedAt ? `Watcher checked ${agoShort(tick - new Date(status.watcherCheckedAt).getTime())} ago` : 'Waiting for the first check'}
+                      <span className="gh-tg">
+                        <span className={`dot ${telegramOn ? 'ok' : 'warn'}`} aria-hidden="true" />
+                        {telegramOn ? 'Telegram on' : 'Telegram off here'}
+                      </span>
+                    </p>
+                    {selPos.liquidationPrice && (
+                      <p className="gh-cushion">
+                        {pool.split('_')[0]} can {selPos.liquidationPrice.movePercent < 0 ? 'fall' : 'rise'}{' '}
+                        <b className="gold-num">{Math.abs(selPos.liquidationPrice.movePercent).toFixed(1)}%</b> before liquidation, at ${selPos.liquidationPrice.price.toFixed(4)}
+                      </p>
+                    )}
+                    <DayStrip schedules={liveSchedules} events={events ?? []} tz={tz} now={tick} days={1} />
+                  </section>
+                ) : (
+                  <TradeTicket
+                    market={selMarket}
+                    pool={pool}
+                    quote={quote && (quote as any).pool === pool ? quote : null}
+                    quoteError={quoteError}
+                    status={status}
+                    actsBelow={actsBelow}
+                    caps={caps}
+                    existing={selPos}
+                    onDone={() => void loadPositions()}
+                    onOpened={setOpened}
+                  />
+                )}
+              </div>
+            </div>
+            {opened.some((l) => l.digest) && (
               <p className="opened" data-film="opened">
                 <b>Opened</b>
                 {opened
@@ -664,289 +785,41 @@ function App() {
                       <Link key={l.digest} to={`/tx/${l.digest}`} className="ext" data-film="open-tx">
                         {l.label} <span className="mono">{short(l.digest!)}</span> <ForkTag />
                       </Link>
-                    ) : (
-                      <a key={l.digest} className="ext" href={`https://suiscan.xyz/mainnet/tx/${l.digest}`} target="_blank" rel="noreferrer">
-                        {l.label} <ArrowOut />
-                      </a>
-                    ),
+                    ) : null,
                   )}
               </p>
             )}
-
-            {/* (1) The guard at a glance */}
-            <section className={`card guard-hero ${tier ? `is-${tier}` : ''}`} id="position" aria-labelledby="guard-title" data-film="position">
-              <div className="gh-grid">
-                <Gauge ratio={state ? Number(ratio) : null} noDebt={noDebt} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && source === 'watch' && !!watchId && !errors.watch} />
-                <div className="gh-mid">
-                  <div className="seg" role="group" aria-label="Position source">
-                    <button aria-pressed={source === 'watch'} className={source === 'watch' ? 'on' : ''} onClick={() => setSource('watch')}>
-                      Watch any
-                    </button>
-                    <button aria-pressed={source === 'bot'} className={source === 'bot' ? 'on' : ''} onClick={() => setSource('bot')} data-film="source-bot">
-                      Bot wallet
-                    </button>
-                  </div>
-                  <h1 id="guard-title" className={`gh-word g-${guardTone}`} data-film="protection">
-                    {guardWord}
-                  </h1>
-                  <p className="gh-status" data-film="status-line">
-                    {statusParts.join(' · ')}
-                  </p>
-                  <p className="gh-beat" data-film="heartbeat" aria-live="polite">
-                    <span className={`beat ${checkedAt ? 'on' : ''}`} aria-hidden="true" />
-                    {beat}
-                    <span className="gh-tg">
-                      <span className={`dot ${telegramOn ? 'ok' : 'warn'}`} aria-hidden="true" />
-                      {!status ? '…' : telegramOn ? 'Telegram on' : 'Telegram: setup required'}
-                    </span>
-                  </p>
-                  {cushion && cushion.kind === 'move' && (
-                    <p className="gh-cushion">
-                      SUI can {cushion.move < 0 ? 'fall' : 'rise'} <b className="gold-num">{Math.abs(cushion.move * 100).toFixed(1)}%</b> before liquidation
-                    </p>
-                  )}
-                  {cushion && cushion.kind === 'at' && <p className="gh-cushion bad">At the liquidation line now.</p>}
-                  {!state && source === 'watch' && watchError && <p className="err-line">{watchError}</p>}
-                  {!state && source === 'bot' && <p className="gh-cushion">{status && !status.wallet ? 'Setup required: YOJIMBO_BOT_KEY' : 'No open position yet. Set up step 2 opens one.'}</p>}
-                </div>
-                <figure className="gh-art">
-                  <img src={pose.src} alt={pose.alt} width={768} height={768} />
-                </figure>
+            <PositionsPanel positions={botPositions} error={positionsError} actsBelow={actsBelow} events={events ?? []} fork={!!fork} selected={pool} onSelect={setPool} onDone={() => (void loadPositions(), void refresh())} />
+            <section className="card recent-log" aria-labelledby="recent-title" data-film="recent-log">
+              <div className="mini-head">
+                <h2 id="recent-title">Night log</h2>
+                <Link to="/log" className="ext">
+                  All defences <Arrow />
+                </Link>
               </div>
-              <DayStrip schedules={liveSchedules} events={events ?? []} tz={tz} now={tick} days={1} />
-            </section>
-
-            <div className="duo">
-              {/* (2) Position facts */}
-              <section className="card mini-card" aria-labelledby="pos-title" data-film="position-card">
-                <div className="mini-head">
-                  <h2 id="pos-title">{source === 'watch' ? 'Watched position' : 'Your position'}</h2>
-                  {visiblePosition?.managerId &&
-                    (fork ? (
-                      <span className="ext" title={`${visiblePosition.managerId} (local fork; not on Suiscan)`}>
-                        <span className="mono">{short(visiblePosition.managerId)}</span> <ForkTag />
+              {events && events.length ? (
+                <ul className="rlog">
+                  {events.slice(0, 3).map((e) => (
+                    <li key={e.id}>
+                      <b>
+                        {e.action} {e.amountUsdc} USDC
+                      </b>
+                      <span className="num">
+                        {(e as any).pool ? `${pairName((e as any).pool)} ${(e as any).side ?? ''} · ` : ''}
+                        {e.beforeRatio.toFixed(3)} → <b className="gold-num">{e.afterRatio?.toFixed(3) ?? '—'}</b>
                       </span>
-                    ) : (
-                      <a className="ext" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${visiblePosition.managerId}`} data-film="suiscan">
-                        SuiScan <ArrowOut />
-                      </a>
-                    ))}
-                </div>
-                {source === 'watch' && (
-                  <div className="picker">
-                    {managers === null && !errors.managers ? (
-                      <span className="skeleton picker-skel" aria-label="Loading positions" />
-                    ) : managers && managers.length ? (
-                      <label className="select">
-                        <span className="sr">Position to watch</span>
-                        <select value={watchId} onChange={(e) => selectManager(e.target.value)}>
-                          {!managers.some((m) => m.managerId === watchId) && watchId && <option value={watchId}>{short(watchId)} · pasted</option>}
-                          {managers.map((m) => (
-                            <option key={m.managerId} value={m.managerId}>
-                              {short(m.managerId)} · {m.riskRatio >= 1000 ? 'no debt' : `ratio ${m.riskRatio.toFixed(3)}`} · {ago(m.lastActivity)}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : (
-                      !errors.managers && <p className="fine">No recent SUI/USDC positions found.</p>
-                    )}
-                    {errors.managers && <p className="err-line">Positions: {errors.managers}</p>}
-                    <details className="paste-wrap">
-                      <summary>Paste an ID · {atLiq.length ? `${atLiq.length} at liquidation now` : 'none at liquidation now'}</summary>
-                      <form
-                        className="paste"
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          if (pastedId.trim()) selectManager(pastedId.trim());
-                        }}
-                      >
-                        <input value={pastedId} onChange={(e) => setPastedId(e.target.value)} placeholder="0x… position ID" aria-label="MarginManager ID" spellCheck={false} />
-                        <button className="pill pill-line pill-sm">Watch</button>
-                      </form>
-                      {atLiq.length > 0 && <p className="fine">{atLiq.map((m) => `${short(m.managerId)} (${m.riskRatio.toFixed(3)})`).join(', ')}</p>}
-                    </details>
-                  </div>
-                )}
-                {source === 'bot' && (
-                  <p className="bot-line">
-                    Bot wallet{' '}
-                    {!status ? (
-                      '…'
-                    ) : status.wallet ? (
-                      <a className="mono" href={`https://suiscan.xyz/mainnet/account/${status.wallet}`} target="_blank" rel="noreferrer">
-                        {short(status.wallet)} <ArrowOut />
-                      </a>
-                    ) : (
-                      <b className="setup">Setup required</b>
-                    )}{' '}
-                    · {status?.balanceMist ? `${(Number(status.balanceMist) / 1e9).toFixed(3)} SUI` : '— SUI'} · {status?.usdcBalance ? `${(Number(status.usdcBalance) / 1e6).toFixed(2)} USDC` : '— USDC'}
-                  </p>
-                )}
-                {source === 'bot' && status?.watcherError && !/^(Error:\s*)?Setup required/.test(status.watcherError) && <p className="err-line">{status.watcherError.replace(/^Error:\s*/, '')}</p>}
-                {state ? (
-                  <dl className="mini-kv">
-                    <Fact k="Collateral" v={fmtAmt(state.baseAsset)} unit="SUI" hint="SUI the trade holds" />
-                    <Fact k="Debt" v={fmtAmt(state.quoteDebt)} unit="USDC" hint="USDC it borrowed" />
-                    <Fact k="Cash held" v={fmtAmt(state.quoteAsset)} unit="USDC" hint="USDC not spent on SUI" />
-                    <Fact k="SUI price" v={visiblePosition.price != null ? `$${Number(visiblePosition.price).toFixed(4)}` : '—'} unit="USD" hint="price now, from the oracle" />
-                  </dl>
-                ) : (
-                  <p className="fine">{source === 'watch' ? (watchError ? '' : 'Reading the position…') : 'Nothing open yet.'}</p>
-                )}
-                {state && activeId && (
-                  <div className="dry">
-                    <button className="link-btn" onClick={dryRunDefence} disabled={dryBusy} data-film="dry-run">
-                      {dryBusy ? 'Checking…' : 'Dry-run a defence'}
-                    </button>
-                    <span>never sends</span>
-                  </div>
-                )}
-                {dryRun && (
-                  <p className={`guardrail ${dryRun.ok ? 'ok' : 'refused'}`} role="status">
-                    <b>{dryRun.ok ? 'Dry run' : 'Refused'}</b> {dryRun.text}
-                  </p>
-                )}
-                {fork && source === 'bot' && position?.managerId && (hasDebt || unwind) && (
-                  <div className="dry">
-                    <button className="link-btn" onClick={unwindFork} disabled={!!unwind?.busy} data-film="unwind">
-                      {unwind?.busy ? 'Unwinding…' : 'Unwind on the fork'}
-                    </button>
-                    <span>sell SUI, repay, withdraw</span>
-                  </div>
-                )}
-                {unwind && !unwind.busy && (
-                  <ul className="jrun" role="status" data-film="unwind-result">
-                    {unwind.error && <li className="no">{unwind.error}</li>}
-                    {(unwind.steps ?? []).map((st, i) => (
-                      <li key={i} className={st.status === 'success' ? 'ok' : 'no'}>
-                        <b>{st.step}</b> {st.status ?? '—'}
-                        {st.txDigest && (
-                          <Link to={`/tx/${st.txDigest}`} className="ext">
-                            <span className="mono">{short(st.txDigest)}</span> <ForkTag />
-                          </Link>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {errors.registry && source === 'bot' && <p className="err-line">Registry: {errors.registry}</p>}
-              </section>
-
-              {/* (3) Its rules */}
-              <section className="card mini-card" aria-labelledby="rules-title" data-film="rules">
-                <div className="mini-head">
-                  <h2 id="rules-title">Its rules</h2>
-                  <Link to="/memory" className="ext" data-film="to-memory">
-                    {memory ? `All ${kept.length} memories` : 'Memory'} <Arrow />
-                  </Link>
-                </div>
-                {memory === null && !errors.memory ? (
-                  <div className="rchips">
-                    {[0, 1, 2].map((i) => (
-                      <span key={i} className="skeleton rchip-skel" />
-                    ))}
-                  </div>
-                ) : ruleChips.length ? (
-                  <ul className="rchips">
-                    {ruleChips.map((h) => {
-                      const r = ruleView(h.memory as any);
-                      return (
-                        <li key={h.blobId} className={`rchip r-${r.icon}`} title={h.memory.text}>
-                          <RuleIcon kind={r.icon} />
-                          {r.title}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                ) : localRules ? (
-                  <p className="fine">Rules come from the local rules file (fork), not Walrus.</p>
-                ) : (
-                  <p className="fine">{memorySetup ? 'Setup required: Walrus Memory' : errors.memory || 'No rules yet. Tell it one below.'}</p>
-                )}
-                {visibleDecision && (
-                  <p className="rnow" data-film="decision">
-                    Now: would <b>{visibleDecision.action}</b>
-                    {visibleDecision.amountUsdc ? ` ${visibleDecision.amountUsdc} USDC` : ''} · “{visibleDecision.quote}”
-                  </p>
-                )}
-              </section>
-            </div>
-
-            {/* (4) Chat */}
-            <section className="card chat-card" id="chat" aria-labelledby="chat-title" data-film="chat">
-              <div className="chat-head">
-                <img src={AVATAR} alt="" width={44} height={44} />
-                <div>
-                  <h2 id="chat-title">Talk to your bodyguard</h2>
-                  <p>
-                    <span className={`dot ${status?.openRouter === 'ready' ? 'ok' : 'warn'}`} aria-hidden="true" />
-                    {status?.openRouter === 'ready' ? 'Tool calls show under each answer' : status?.openRouter ?? 'Connecting…'}
-                  </p>
-                </div>
-              </div>
-              <div className="thread" ref={thread} aria-live="polite" data-film="thread">
-                {messages.length === 0 && (
-                  <div className="welcome">
-                    <p className="greet">Tell me when you sleep and what I may do.</p>
-                    <div className="chips">
-                      {STARTERS.map((s) => (
-                        <button key={s} className="chip" onClick={() => send(s)} disabled={busy}>
-                          {s}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {messages.map((m, i) => (
-                  <div className={`message ${m.role}`} key={i}>
-                    {m.role !== 'you' && <img className="avatar" src={AVATAR} alt="" width={30} height={30} />}
-                    <div className="msg-col">
-                      <div className="bubble">
-                        {m.role === 'error' && <b>Error</b>}
-                        <p>{m.role === 'error' ? m.text.replace(/^Error:\s*/, '') : m.text}</p>
-                      </div>
-                      {m.steps && m.steps.length > 0 && <Steps steps={m.steps} />}
-                      <time className="msg-time">
-                        {m.role === 'you' ? 'You' : 'Yojimbo'} · {m.at}
-                      </time>
-                    </div>
-                  </div>
-                ))}
-                {busy && (
-                  <div className="message yojimbo" aria-label="Yojimbo is thinking">
-                    <img className="avatar" src={AVATAR} alt="" width={30} height={30} />
-                    <div className="msg-col">
-                      <div className="bubble thinking">
-                        <span className="typing">
-                          <i />
-                          <i />
-                          <i />
-                        </span>
-                        <small>{live.length && live[live.length - 1].pending ? `Calling ${live[live.length - 1].name}…` : 'Thinking…'}</small>
-                      </div>
-                      {live.length > 0 && <Steps steps={live} />}
-                    </div>
-                  </div>
-                )}
-              </div>
-              <form
-                className="composer"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void send();
-                }}
-              >
-                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. I sleep 01:00 to 08:00 IST" aria-label="Message Yojimbo" data-film="composer" />
-                <button className="pill pill-navy send" disabled={busy}>
-                  {busy ? 'Thinking…' : 'Send'}
-                </button>
-              </form>
-              <details className="trace">
-                <summary>Raw tool JSON ({trace.length})</summary>
-                <div className="trace-body">{trace.length ? trace.map((t, i) => <pre key={i}>{JSON.stringify(t, null, 2)}</pre>) : <p>No tool calls yet.</p>}</div>
-              </details>
+                      <span className="fine">{new Date(e.at).toLocaleTimeString()}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="fine">A quiet night. Every defence lands here with its before and after ratio.</p>
+              )}
             </section>
+            <details className="card setup-more">
+              <summary>Wallet and setup</summary>
+              {journey('panel')}
+            </details>
           </div>
         )}
 
@@ -1264,6 +1137,22 @@ function App() {
           </div>
         )}
       </main>
+      <ChatDock
+        open={chatOpen}
+        min={chatMin}
+        setOpen={setChatOpen}
+        setMin={setChatMin}
+        status={status}
+        messages={messages}
+        busy={busy}
+        live={live}
+        draft={draft}
+        setDraft={setDraft}
+        send={(x) => void send(x)}
+        starters={dockStarters}
+        thread={thread}
+        trace={trace}
+      />
       <footer className="app-foot">
         <span>Yojimbo · DeepBook Margin on {fork ? fork.label : 'Sui mainnet'} · chain reads: {status?.rpc ?? '…'} · memory: {localRules ? 'local rules file (fork)' : 'Walrus Memory'}</span>
         <span>MIT · © 2026 Nivesh Gajengi · Art generated with ChatGPT</span>
@@ -1814,6 +1703,580 @@ function Ticket(props: {
         </ul>
       )}
     </section>
+  );
+}
+
+/* ---------- round 4: the margin terminal ---------- */
+type Side2 = 'long' | 'short';
+type Market = {
+  pool: string;
+  base: string;
+  quote: string;
+  enabled: boolean;
+  liquidation: number;
+  minBorrow: number;
+  midPrice: number | null;
+  lotSize: number;
+  minSize: number;
+  long: { supported: boolean; reason?: string };
+  short: { supported: boolean; reason?: string };
+};
+type BotPosition = {
+  managerId: string;
+  pool: string;
+  side: Side2 | 'none';
+  riskRatio: number | null;
+  state: any;
+  price: number;
+  liquidation: { ratio: number; minBorrowRatio: number };
+  liquidationPrice: { price: number; direction: string; movePercent: number } | null;
+  decision: Decision | null;
+  decisionError?: string;
+  caps: { perActionUsdc: number; dailyUsdc: number; spentTodayUsdc: number };
+};
+type Candle = { time: number; open: number; high: number; low: number; close: number };
+const LOGOS: Record<string, string> = { SUI: '/tokens/sui.svg', USDC: '/tokens/usdc.svg', XBTC: '/tokens/btc.svg', SUIUSDE: '/tokens/usde.svg' };
+const pairName = (pool: string) => pool.replace('_', '/');
+function TokenLogo({ sym, size = 28 }: { sym: string; size?: number }) {
+  return LOGOS[sym] ? (
+    <img className="tok" src={LOGOS[sym]} alt="" width={size} height={size} />
+  ) : (
+    <span className="tok tok-letter" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden="true">
+      {sym.slice(0, 1)}
+    </span>
+  );
+}
+/** Liquidation price for any margin position: risk ratio (base·p + quote) ÷ (baseDebt·p + quoteDebt) meets the pool line L. */
+function liqPriceOf(s: { base: number; quote: number; baseDebt: number; quoteDebt: number }, L: number) {
+  const den = s.base - L * s.baseDebt;
+  if (den === 0) return null;
+  const p = (L * s.quoteDebt - s.quote) / den;
+  return p > 0 && Number.isFinite(p) ? p : null;
+}
+
+function MarketBar(props: { markets: Market[] | null; pool: string; setPool: (p: string) => void; price: number | null; change24h: number | null; source: string; liquidation?: number; marketsError?: string }) {
+  const [open, setOpen] = useState(false);
+  const m = props.markets?.find((x) => x.pool === props.pool);
+  const [base, quote] = props.pool.split('_');
+  const up = (props.change24h ?? 0) >= 0;
+  return (
+    <div className="mbar" data-film="market-bar">
+      <div className="mbar-pair">
+        <button className="pair-btn" aria-expanded={open} onClick={() => setOpen((v) => !v)} data-film="pair-select">
+          <span className="pair-logos">
+            <TokenLogo sym={base} size={34} />
+            <TokenLogo sym={quote} size={22} />
+          </span>
+          <span className="pair-txt">
+            <b>{pairName(props.pool)}</b>
+            <small>DeepBook Margin · {m ? `${[m.long.supported && 'long', m.short.supported && 'short'].filter(Boolean).join(' & ') || 'coming soon'}` : '…'}</small>
+          </span>
+          <svg width="14" height="14" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="m3 4.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
+        {open && (
+          <ul className="pair-menu" role="listbox">
+            {props.markets === null && <li className="pm-note">{props.marketsError ? `Markets: ${props.marketsError}` : 'Reading DeepBook margin pools…'}</li>}
+            {(props.markets ?? []).map((x) => {
+              const ok = x.long.supported || x.short.supported;
+              const [b, q] = x.pool.split('_');
+              return (
+                <li key={x.pool}>
+                  <button
+                    role="option"
+                    aria-selected={x.pool === props.pool}
+                    disabled={!ok}
+                    onClick={() => {
+                      props.setPool(x.pool);
+                      setOpen(false);
+                    }}
+                    title={ok ? '' : x.long.reason}
+                  >
+                    <TokenLogo sym={b} size={24} />
+                    <span>
+                      <b>{pairName(x.pool)}</b>
+                      <small>{ok ? `long ${x.long.supported ? '✓' : '—'} · short ${x.short.supported ? '✓' : '—'}` : `Coming soon · ${x.long.reason ?? ''}`}</small>
+                    </span>
+                    <em className="num">{x.midPrice != null ? `$${x.midPrice.toFixed(4)}` : ''}</em>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+      <div className="mbar-stat">
+        <span>Price</span>
+        <b className="num mbar-price">{props.price != null ? `$${props.price.toFixed(4)}` : '…'}</b>
+      </div>
+      <div className="mbar-stat">
+        <span>24 h change</span>
+        <b className={`num ${up ? 'up' : 'down'}`}>{props.change24h != null ? `${up ? '+' : ''}${props.change24h.toFixed(2)}%` : '…'}</b>
+      </div>
+      <div className="mbar-stat">
+        <span>Pool sells you out at</span>
+        <b className="num">risk ratio {props.liquidation != null ? props.liquidation.toFixed(2) : '…'}</b>
+      </div>
+      <div className="mbar-src">{props.source}</div>
+    </div>
+  );
+}
+
+function PriceChart({ candles, price, lines }: { candles: Candle[] | null; price: number | null; lines: { price: number; title: string; color: string }[] }) {
+  const box = useRef<HTMLDivElement>(null);
+  const chart = useRef<any>(null);
+  const series = useRef<any>(null);
+  const pl = useRef<any[]>([]);
+  useEffect(() => {
+    if (!box.current) return;
+    let dead = false;
+    import('lightweight-charts').then(({ createChart, AreaSeries, ColorType, CrosshairMode }) => {
+      if (dead || !box.current) return;
+      const c = createChart(box.current, {
+        autoSize: true,
+        layout: { background: { type: ColorType.Solid, color: 'transparent' }, textColor: '#6a6658', fontFamily: 'Space Mono, ui-monospace, monospace', fontSize: 11, attributionLogo: false },
+        grid: { vertLines: { color: 'rgba(20,22,31,0.04)' }, horzLines: { color: 'rgba(20,22,31,0.06)' } },
+        rightPriceScale: { borderColor: 'rgba(20,22,31,0.1)', scaleMargins: { top: 0.12, bottom: 0.08 } },
+        timeScale: { borderColor: 'rgba(20,22,31,0.1)', timeVisible: true, secondsVisible: false, fixLeftEdge: true, fixRightEdge: true },
+        crosshair: { mode: CrosshairMode.Normal },
+        handleScroll: false,
+        handleScale: false,
+        localization: { priceFormatter: (p: number) => `$${p.toFixed(4)}` },
+      });
+      series.current = c.addSeries(AreaSeries, { lineColor: '#141c3a', lineWidth: 2, topColor: 'rgba(20,28,58,0.14)', bottomColor: 'rgba(20,28,58,0)', priceLineVisible: false, lastValueVisible: true });
+      chart.current = c;
+      setTick((t) => t + 1);
+    });
+    return () => {
+      dead = true;
+      chart.current?.remove();
+      chart.current = null;
+      series.current = null;
+      pl.current = [];
+    };
+  }, []);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const s = series.current;
+    if (!s || !candles) return;
+    const data = candles.map((x) => ({ time: x.time, value: x.close }));
+    s.setData(data);
+    chart.current?.timeScale().fitContent();
+  }, [candles, tick]);
+  const key = lines.map((l) => `${l.title}:${l.price.toFixed(5)}`).join('|');
+  useEffect(() => {
+    const s = series.current;
+    if (!s) return;
+    for (const p of pl.current) s.removePriceLine(p);
+    pl.current = lines.map((l) => s.createPriceLine({ price: l.price, color: l.color, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: l.title }));
+  }, [key, tick]);
+  return (
+    <div className="pchart" data-film="chart">
+      <div className="pchart-box" ref={box} />
+      {!candles && <div className="pchart-wait">Reading price history from the DeepBook indexer…</div>}
+      {price != null && <span className="sr">Price now {price}</span>}
+    </div>
+  );
+}
+
+const LEVS2 = [1.5, 2, 3];
+function TradeTicket(props: {
+  market: Market | undefined;
+  pool: string;
+  quote: { midPrice: number; lotSize: number; minSize: number; source: string } | null;
+  quoteError: string;
+  status: Status | null;
+  actsBelow: number;
+  caps?: { perActionUsdc: number };
+  existing: BotPosition | undefined;
+  onDone: () => void;
+  onOpened: (lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[]) => void;
+}) {
+  const { market, quote, status, actsBelow } = props;
+  const [side, setSide] = useState<Side2>('long');
+  const [deposit, setDeposit] = useState('6');
+  const [lev, setLev] = useState(1.5);
+  const [run, setRun] = useState<{ busy: boolean; lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[] } | null>(null);
+  const [base] = props.pool.split('_');
+  const d = Number(deposit);
+  const b = Number.isFinite(d) ? Math.round(d * (lev - 1) * 100) / 100 : NaN; // borrowed, in USDC terms
+  const p = quote?.midPrice;
+  const lot = quote?.lotSize ?? market?.lotSize ?? 0.1;
+  const L = market?.liquidation;
+  const wallet = status?.usdcBalance != null ? Number(status.usdcBalance) / 1e6 : null;
+  // Long: deposit + borrow USDC, 90% buys base. Short: borrow base worth b USDC (in lots) and sell it.
+  const size = p && d > 0 ? (side === 'long' ? Math.floor(((d + b) * 0.9) / p / lot) * lot : Math.floor(b / p / lot) * lot) : null;
+  const sim =
+    size != null && p
+      ? side === 'long'
+        ? { base: size, quote: d + b - size * p, baseDebt: 0, quoteDebt: b }
+        : { base: 0, quote: d + size * p, baseDebt: size, quoteDebt: 0 }
+      : null;
+  const ratio0 = sim && p ? (sim.base * p + sim.quote) / (sim.baseDebt * p + sim.quoteDebt) : null;
+  const liq = sim && L != null ? liqPriceOf(sim, L) : null;
+  const alertP = sim ? liqPriceOf(sim, actsBelow) : null;
+  const supported = market ? market[side].supported : false;
+  const cap = props.caps?.perActionUsdc;
+  const problem = !market
+    ? 'Reading the pool…'
+    : !supported
+      ? `${side === 'long' ? 'Long' : 'Short'} on ${pairName(props.pool)} is coming soon: ${market[side].reason ?? 'not verified yet'}`
+      : props.existing && props.existing.side !== 'none'
+        ? `The bot already has a ${props.existing.side} open on ${pairName(props.pool)}. Unwind it first (one position per pool).`
+        : !(d > 0)
+          ? 'Enter how much USDC you put in.'
+          : wallet != null && d > wallet
+            ? `The bot wallet holds ${wallet.toFixed(2)} USDC. Put in less, or fund it first.`
+            : cap != null && (d > cap || b > cap)
+              ? `Each amount must be at most ${cap} USDC, Yojimbo's per-action cap.`
+              : market.minBorrow != null && ratio0 != null && ratio0 < market.minBorrow
+                ? `At ${lev}× it would start under the pool's minimum ratio ${market.minBorrow.toFixed(2)}. Pick less leverage.`
+                : size != null && quote && size < quote.minSize
+                  ? `Too small for the pool's minimum order (${quote.minSize} ${base}). Put in more.`
+                  : '';
+  const open = async () => {
+    if (problem || run?.busy || !p || size == null) return;
+    const lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[] = [];
+    setRun({ busy: true, lines });
+    try {
+      if (!props.existing) {
+        const r = await post('/bot/create', { pool: props.pool });
+        lines.push({ label: `Create the ${pairName(props.pool)} margin account`, text: outcome(r), ok: sent(r), digest: r.txDigest, fork: r.mode === 'fork' });
+        setRun({ busy: true, lines: [...lines] });
+        if (!sent(r)) return;
+      }
+      const body = side === 'long' ? { pool: props.pool, side, depositUsdc: d, borrowUsdc: b } : { pool: props.pool, side, depositUsdc: d, borrowBase: Math.round(size * 1e6) / 1e6 };
+      const o = await post('/bot/open', body);
+      lines.push({ label: side === 'long' ? `Deposit, borrow USDC and buy ${base}` : `Deposit, borrow ${base} and sell it`, text: outcome(o), ok: sent(o), digest: o.txDigest, fork: o.mode === 'fork' });
+    } catch (e) {
+      lines.push({ label: 'Refused', text: String((e as Error).message ?? e), ok: false });
+    } finally {
+      setRun({ busy: false, lines: [...lines] });
+      props.onOpened([...lines]);
+      props.onDone();
+    }
+  };
+  const usd = (v: number | null | undefined, dp = 4) => (v == null || !Number.isFinite(v) ? '—' : `$${v.toFixed(dp)}`);
+  return (
+    <section className="card tticket" aria-label="Trade ticket" data-film="ticket">
+      <div className="tt-sides" role="group" aria-label="Direction">
+        {(['long', 'short'] as Side2[]).map((s) => (
+          <button key={s} className={`tt-side ${s} ${side === s ? 'on' : ''}`} aria-pressed={side === s} onClick={() => setSide(s)} data-film={`side-${s}`}>
+            <b>{s === 'long' ? '↑ Long' : '↓ Short'}</b>
+            <small>{s === 'long' ? `wins if ${base} rises` : `wins if ${base} falls`}</small>
+            {market && !market[s].supported && <em>coming soon</em>}
+          </button>
+        ))}
+      </div>
+      <label className="tk-field">
+        <span>Your money in</span>
+        <span className="field">
+          <TokenLogo sym="USDC" size={22} />
+          <input inputMode="decimal" value={deposit} onChange={(e) => setDeposit(e.target.value)} aria-label="Your money in, USDC" data-film="ticket-amount" />
+          <em>USDC</em>
+        </span>
+        <small>{wallet != null ? `Bot wallet holds ${wallet.toFixed(2)} USDC` : 'Bot wallet balance unknown'}</small>
+      </label>
+      <div className="tk-field">
+        <span>Leverage</span>
+        <div className="tk-lev" role="group" aria-label="Leverage">
+          {LEVS2.map((l) => (
+            <button key={l} className={lev === l ? 'on' : ''} aria-pressed={lev === l} onClick={() => setLev(l)} data-film={`lev-${l}`}>
+              {l}×
+            </button>
+          ))}
+        </div>
+        <small>{Number.isFinite(b) ? (side === 'long' ? `Borrows ${b.toFixed(2)} USDC to buy more ${base}.` : `Borrows ${size != null ? size.toFixed(1) : '—'} ${base} (≈ ${b.toFixed(2)} USDC) and sells it.`) : '—'}</small>
+      </div>
+      <dl className="tt-prev" data-film="ticket-preview">
+        <div>
+          <dt>Position size</dt>
+          <dd className="num">{size != null && p ? `${size.toFixed(1)} ${base} · ${usd(size * p, 2)}` : '—'}</dd>
+        </div>
+        <div>
+          <dt>Entry price</dt>
+          <dd className="num">{usd(p)}</dd>
+        </div>
+        <div>
+          <dt>Liquidation price</dt>
+          <dd className="num tk-liq">{usd(liq)}</dd>
+        </div>
+        <div>
+          <dt>Risk ratio</dt>
+          <dd className="num">
+            {ratio0 != null ? ratio0.toFixed(2) : '—'} <small>· Yojimbo acts below {actsBelow.toFixed(2)}</small>
+          </dd>
+        </div>
+      </dl>
+      <p className="tk-plain" data-film="ticket-plain">
+        {liq != null && p ? (
+          <>
+            If {base} {side === 'long' ? 'falls' : 'rises'} to <b>{usd(liq)}</b>, the pool sells this position to repay the loan.{' '}
+            {alertP != null && (side === 'long' ? alertP >= p : alertP <= p) ? (
+              <>It starts under Yojimbo's {actsBelow.toFixed(2)} line, so Yojimbo adds collateral right after it opens.</>
+            ) : (
+              <>
+                Yojimbo steps in at <b>{usd(alertP)}</b>.
+              </>
+            )}
+          </>
+        ) : (
+          props.quoteError || 'Reading the pool price…'
+        )}
+      </p>
+      {problem && <p className="err-line">{problem}</p>}
+      <button className={`pill pill-lg pill-block ${side === 'long' ? 'pill-long' : 'pill-short'}`} onClick={open} disabled={!!problem || !p || !!run?.busy} data-film="open-trade">
+        {run?.busy ? 'Opening…' : `Open ${side} ${base}`}
+      </button>
+      {run && run.lines.length > 0 && (
+        <ul className="jrun" role="status" data-film="ticket-result">
+          {run.lines.map((l, i) => (
+            <li key={i} className={l.ok ? 'ok' : 'no'}>
+              <b>{l.label}</b> {l.ok ? 'done' : l.text}
+              {l.digest && l.fork && (
+                <Link to={`/tx/${l.digest}`} className="ext">
+                  <span className="mono">{short(l.digest)}</span> <ForkTag />
+                </Link>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="fine">Before trading fees. Long: 90% of the USDC buys {base} at market. Short: the borrowed {base} is sold at market.</p>
+    </section>
+  );
+}
+
+function PositionsPanel(props: { positions: BotPosition[] | null; error?: string; actsBelow: number; events: EventRow[]; fork: boolean; selected: string; onSelect: (pool: string) => void; onDone: () => void }) {
+  const [busy, setBusy] = useState('');
+  const [result, setResult] = useState<Record<string, { ok: boolean; text: string; steps?: { step: string; txDigest: string | null; status: string | null }[] }>>({});
+  const unwind = async (id: string) => {
+    setBusy(id);
+    try {
+      const r = await post('/bot/unwind', { managerId: id });
+      setResult((v) => ({ ...v, [id]: { ok: !!r.done, text: r.done ? 'Unwound: no debt left' : 'Unwind incomplete', steps: r.steps } }));
+    } catch (e) {
+      setResult((v) => ({ ...v, [id]: { ok: false, text: String((e as Error).message ?? e) } }));
+    } finally {
+      setBusy('');
+      props.onDone();
+    }
+  };
+  const open = (props.positions ?? []).filter((x) => x.side !== 'none' || result[x.managerId]);
+  return (
+    <section className="card positions" aria-labelledby="pos-title2" data-film="positions">
+      <div className="card-title">
+        <div>
+          <h2 id="pos-title2">Positions and their bodyguard</h2>
+          <p>Every 15 seconds Yojimbo reads each one and acts on your remembered rules.</p>
+        </div>
+      </div>
+      {props.positions === null ? (
+        props.error ? <p className="err-line">{props.error}</p> : <span className="skeleton log-skel" />
+      ) : open.length === 0 ? (
+        <p className="fine">No open positions yet. Open a long or a short with the ticket.</p>
+      ) : (
+        <div className="ptable">
+          <div className="ptable-head" aria-hidden="true">
+            <span>Market</span>
+            <span>Size</span>
+            <span>Risk ratio</span>
+            <span>Liquidation</span>
+            <span>Bodyguard</span>
+            <span />
+          </div>
+          {open.map((x) => {
+            const [base] = x.pool.split('_');
+            const r = x.riskRatio;
+            const tone = r == null ? 'muted' : r <= x.liquidation.ratio * 1.05 ? 'danger' : r <= props.actsBelow ? 'watch' : 'safe';
+            const last = props.events.find((e) => (e as any).managerId === x.managerId);
+            const debt = x.side === 'long' ? `${fmtAmt(x.state.quoteDebt)} USDC owed` : x.side === 'short' ? `${fmtAmt(x.state.baseDebt)} ${base} owed` : 'no debt';
+            return (
+              <article key={x.managerId} className={`prow ${x.pool === props.selected ? 'sel' : ''}`} data-film="position-row">
+                <button className="prow-mkt" onClick={() => props.onSelect(x.pool)}>
+                  <TokenLogo sym={base} size={30} />
+                  <span>
+                    <b>{pairName(x.pool)}</b>
+                    <em className={`side-tag ${x.side}`}>{x.side === 'none' ? 'closed' : x.side}</em>
+                  </span>
+                </button>
+                <span className="num prow-size">
+                  {x.side === 'long' ? `${fmtAmt(x.state.baseAsset)} ${base}` : x.side === 'short' ? `${fmtAmt(x.state.quoteAsset)} USDC` : '—'}
+                  <small>{debt}</small>
+                </span>
+                <span className={`num prow-ratio t-${tone}`} data-film="row-ratio">
+                  <b>{r == null || x.side === 'none' ? 'No debt' : r >= 1000 ? '999+' : r.toFixed(3)}</b>
+                  <small>owns ÷ owes · line {props.actsBelow.toFixed(2)}</small>
+                </span>
+                <span className="num prow-liq">
+                  {x.liquidationPrice ? `$${x.liquidationPrice.price.toFixed(4)}` : '—'}
+                  <small>{x.liquidationPrice ? `${base} ${x.liquidationPrice.movePercent < 0 ? 'falls' : 'rises'} ${Math.abs(x.liquidationPrice.movePercent).toFixed(1)}%` : ''}</small>
+                </span>
+                <span className="prow-guard" data-film="row-guard">
+                  <b className={`g-${tone === 'safe' ? 'ok' : tone === 'muted' ? 'muted' : 'warn'}`}>{x.side === 'none' ? 'Nothing to guard' : x.decision ? (x.decision.action === 'ignore' ? 'Guarding' : `Would ${x.decision.action} ${x.decision.amountUsdc} USDC`) : 'Checking…'}</b>
+                  <small>{last ? `Last: ${last.action} ${last.amountUsdc} USDC · ${last.beforeRatio.toFixed(2)} → ${last.afterRatio?.toFixed(2) ?? '—'}` : x.decision ? `“${x.decision.quote}”` : x.decisionError ?? ''}</small>
+                </span>
+                <span className="prow-act">
+                  {props.fork && x.side !== 'none' && (
+                    <button className="pill pill-line pill-sm" onClick={() => unwind(x.managerId)} disabled={!!busy} data-film="unwind">
+                      {busy === x.managerId ? 'Unwinding…' : 'Unwind'}
+                    </button>
+                  )}
+                  {!props.fork && (
+                    <a className="ext" href={`https://suiscan.xyz/mainnet/object/${x.managerId}`} target="_blank" rel="noreferrer">
+                      SuiScan <ArrowOut />
+                    </a>
+                  )}
+                </span>
+                {result[x.managerId] && (
+                  <p className={`prow-res ${result[x.managerId].ok ? 'ok' : 'no'}`} data-film="unwind-result">
+                    {result[x.managerId].text}
+                    {(result[x.managerId].steps ?? []).map((st) =>
+                      st.txDigest ? (
+                        <Link key={st.txDigest} to={`/tx/${st.txDigest}`} className="ext">
+                          {st.step.split(' ').slice(0, 3).join(' ')} <span className="mono">{short(st.txDigest)}</span> <ForkTag />
+                        </Link>
+                      ) : null,
+                    )}
+                  </p>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** The assistant: a floating launcher that opens a panel docked on the right. It stays open while you trade. */
+function ChatDock(props: {
+  open: boolean;
+  min: boolean;
+  setOpen: (v: boolean) => void;
+  setMin: (v: boolean) => void;
+  status: Status | null;
+  messages: Message[];
+  busy: boolean;
+  live: Step[];
+  draft: string;
+  setDraft: (v: string) => void;
+  send: (preset?: string) => void;
+  starters: string[];
+  thread: React.RefObject<HTMLDivElement | null>;
+  trace: any[];
+}) {
+  const model = props.status?.openRouter === 'ready' ? 'ready' : props.status?.openRouter ?? 'Connecting…';
+  return (
+    <>
+      {!props.open && (
+        <button className="dock-launch" onClick={() => (props.setOpen(true), props.setMin(false))} aria-label="Talk to your bodyguard" data-film="chat-launch">
+          <img src={AVATAR} alt="" width={56} height={56} />
+          <span>Ask your bodyguard</span>
+        </button>
+      )}
+      <aside className={`dock ${props.open ? 'is-open' : ''} ${props.min ? 'is-min' : ''}`} aria-label="Talk to your bodyguard" aria-hidden={!props.open} data-film="chat">
+        <header className="dock-head">
+          <img src={AVATAR} alt="" width={40} height={40} />
+          <div>
+            <h2 id="chat-title">Your bodyguard</h2>
+            <p>
+              <span className={`dot ${props.status?.openRouter === 'ready' || /Claude/.test(String(props.status?.openRouter)) ? 'ok' : 'warn'}`} aria-hidden="true" />
+              {model === 'ready' ? 'Sees your pair and positions' : model}
+            </p>
+          </div>
+          <button className="dock-ic" onClick={() => props.setMin(!props.min)} aria-label={props.min ? 'Expand' : 'Minimize'} data-film="chat-min">
+            {props.min ? '▴' : '▾'}
+          </button>
+          <button className="dock-ic" onClick={() => props.setOpen(false)} aria-label="Close">
+            ×
+          </button>
+        </header>
+        {!props.min && (
+          <>
+            <div className="dock-thread" ref={props.thread} aria-live="polite" data-film="thread">
+              {props.messages.length === 0 && (
+                <div className="welcome">
+                  <p className="greet">I watch your positions and follow the rules you give me. Ask me about the trade on screen.</p>
+                  <div className="chips">
+                    {props.starters.map((s) => (
+                      <button key={s} className="chip" onClick={() => props.send(s)} disabled={props.busy}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {props.messages.map((m, i) => (
+                <div className={`message ${m.role}`} key={i}>
+                  {m.role !== 'you' && <img className="avatar" src={AVATAR} alt="" width={28} height={28} />}
+                  <div className="msg-col">
+                    {m.steps && m.steps.length > 0 && <ToolChips steps={m.steps} />}
+                    <div className="bubble">
+                      {m.role === 'error' && <b>Error</b>}
+                      <p>{m.role === 'error' ? m.text.replace(/^Error:\s*/, '') : m.text}</p>
+                    </div>
+                    <time className="msg-time">
+                      {m.role === 'you' ? 'You' : 'Yojimbo'} · {m.at}
+                    </time>
+                  </div>
+                </div>
+              ))}
+              {props.busy && (
+                <div className="message yojimbo" aria-label="Yojimbo is thinking">
+                  <img className="avatar" src={AVATAR} alt="" width={28} height={28} />
+                  <div className="msg-col">
+                    {props.live.length > 0 && <ToolChips steps={props.live} />}
+                    <div className="bubble thinking">
+                      <span className="typing">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                      <small>{props.live.length && props.live[props.live.length - 1].pending ? `Calling ${props.live[props.live.length - 1].name}…` : 'Thinking…'}</small>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+            <form
+              className="composer"
+              onSubmit={(e) => {
+                e.preventDefault();
+                props.send();
+              }}
+            >
+              <input value={props.draft} onChange={(e) => props.setDraft(e.target.value)} placeholder="Ask about this trade…" aria-label="Message Yojimbo" data-film="composer" />
+              <button className="pill pill-navy send" disabled={props.busy}>
+                {props.busy ? '…' : 'Send'}
+              </button>
+            </form>
+            <details className="trace">
+              <summary>Raw tool JSON ({props.trace.length})</summary>
+              <div className="trace-body">{props.trace.length ? props.trace.map((t, i) => <pre key={i}>{JSON.stringify(t, null, 2)}</pre>) : <p>No tool calls yet.</p>}</div>
+            </details>
+          </>
+        )}
+      </aside>
+    </>
+  );
+}
+function ToolChips({ steps }: { steps: Step[] }) {
+  return (
+    <ul className="tchips" aria-label="Tool calls" data-film="tool-steps">
+      {steps.map((s, i) => (
+        <li key={i} className={`tchip ${s.error ? 'err' : s.pending ? 'pending' : 'done'}`} title={[...s.args, ...s.result].map(([k, v]) => `${k}: ${v}`).join('\n')}>
+          <i aria-hidden="true">{s.error ? '!' : s.pending ? '…' : '✓'}</i>
+          <code>{s.name}</code>
+          {!s.pending && !s.error && s.result[0] && (
+            <small>
+              {s.result[0][0]} {s.result[0][1]}
+            </small>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
 
