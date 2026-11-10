@@ -47,6 +47,12 @@ function memoryReady(){return Boolean(process.env.MEMWAL_MAINNET_KEY&&process.en
 type EventRow={id:string;at:string;pool?:string;side?:string;managerId?:string;beforeRatio:number;afterRatio:number|null;suiPrice:number;movePercent:number;mode:string;action:Action;amountUsdc:number;outcome:string;txDigest:string|null;ruleIds:string[];recalledBlobIds:string[];memoryBlobId?:string;memoryError?:string};
 let events:EventRow[]=[];
 try { events=JSON.parse(await readFile(dataFile,'utf8')); } catch {}
+// Order history: every open, create and unwind the app sends for the bot, with its outcome and digest (defences stay in events).
+type OrderRow={id:string;at:string;kind:'create'|'open'|'close';pool:string;side:string|null;detail:string;mode:string;status:string|null;txDigest:string|null};
+const ordersFile=resolve(dataDir,'orders.json');
+let orders:OrderRow[]=[];
+try { orders=JSON.parse(await readFile(ordersFile,'utf8')); } catch {}
+async function logOrder(row:Omit<OrderRow,'id'|'at'>){orders.unshift({id:memoryId(),at:new Date().toISOString(),...row});orders=orders.slice(0,200);await mkdir(dataDir,{recursive:true});await writeFile(ordersFile,JSON.stringify(orders,null,2));emit('order',orders[0]);}
 const listeners=new Set<ServerResponse>();
 type Meta={pool:string;side:string};
 const pending=new Map<string,{decision:Decision;context:Context;owner:string;managerId:string;state:any;meta:Meta;timer:ReturnType<typeof setTimeout>}>();
@@ -315,6 +321,7 @@ const server=createServer(async(req,res)=>{try{
   const target=typeof data.managerId==='string'?mine.find(m=>m.managerId===data.managerId.toLowerCase()):mine.find(m=>m.side!=='none')??mine[0];
   if(!target)return json(res,404,{error:'That MarginManager is not one of the bot wallet\'s'});
   const r=await unwindPosition(address,target.managerId,address);
+  for(const st of r.steps){const x:any=st.result;if(x?.txDigest)await logOrder({kind:'close',pool:target.pool,side:target.side,detail:st.step,mode:x.mode??'unknown',status:x.status?.status??null,txDigest:x.txDigest});}
   return json(res,200,{managerId:target.managerId,pool:target.pool,side:target.side,done:r.done,steps:r.steps.map(s=>({step:s.step,txDigest:(s.result as any)?.txDigest??null,status:(s.result as any)?.status?.status??null,mode:(s.result as any)?.mode??null,state:s.state??null}))});
  }
  // Setup writes for the bot's own position. Both go through core's write gate: without
@@ -347,6 +354,7 @@ const server=createServer(async(req,res)=>{try{
   }
   const allowed=process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS';
   const note=result.mode==='fork'?`Executed on ${FORK_SOURCE} @ checkpoint ${result.fork.forkedAtCheckpoint}, not mainnet`:result.mode==='mainnet'?'Executed on mainnet':allowed?'Dry run did not succeed, nothing was sent':'Dry-run only: YOJIMBO_ALLOW_MAINNET is not set, nothing was sent';
+  {const x:any=result;await logOrder({kind:path==='/bot/create'?'create':'open',pool,side:path==='/bot/create'?null:side,detail:path==='/bot/create'?'Create the margin account':side==='long'?`Deposit ${Number(data.depositUsdc)} USDC, borrow ${Number(data.borrowUsdc)} USDC, buy`:`Deposit ${Number(data.depositUsdc)} USDC, borrow ${data.borrowBase!=null?Number(data.borrowBase):'—'} base, sell`,mode:x.mode??'unknown',status:x.status?.status??null,txDigest:x.txDigest??null});}
   return json(res,200,{...result,pool,note});
  }
  // LOCAL FORK only: a fork transaction's status and effects from the fork RPC, since Suiscan cannot show it.
@@ -402,6 +410,7 @@ const server=createServer(async(req,res)=>{try{
  if(path==='/memory'&&process.env.YOJIMBO_BOT_KEY&&!memoryReady()&&fork&&process.env.YOJIMBO_FORK_RULES){const address=owner();const hits=await forkRuleHits(resolve(process.cwd(),'../..',process.env.YOJIMBO_FORK_RULES));let currentDecision:Decision|null=null;try{const {ctx}=await context(address);currentDecision=decide(hits,ctx);}catch{}return json(res,200,{hits,decision:currentDecision,source:'local-file',setup:'Setup required: Walrus Memory'});}
  if(path==='/memory'){if(!process.env.YOJIMBO_BOT_KEY||!memoryReady())return json(res,200,{hits:[],decision:null,setup:'Setup required: Walrus Memory'});const address=owner();const hits=await memoryOf(address).recallQuery('Yojimbo all schedules rules overrides and owner preferences');let currentDecision:Decision|null=null;try{const {ctx}=await context(address);currentDecision=decide(await recall(address,ctx),ctx);}catch{}return json(res,200,{hits,decision:currentDecision});}
  if(path==='/events')return json(res,200,{events});
+ if(path==='/orders')return json(res,200,{orders,fork:!!fork});
  if(path==='/chat'&&req.method==='POST'){const data=await body(req);return chat(res,String(data.message||''),typeof data.watchManagerId==='string'?data.watchManagerId:undefined,data.context&&typeof data.context==='object'?data.context:undefined);}
  if(path==='/decision'&&req.method==='POST'){const data=await body(req);const item=pending.get(data.id);if(!item)return json(res,404,{error:'Approval request expired'});clearTimeout(item.timer);pending.delete(data.id);
   const action:Action=data.choice==='approve'?item.decision.action:data.choice==='reduce'?'reduce':'ignore';if(action==='ignore'){await notify('Yojimbo ignored the alert at owner request.');return json(res,200,{outcome:'ignored'});}
