@@ -27,7 +27,7 @@ The chat agent's tool calls stream into the UI as it works. The language model w
 **Status, stated plainly:**
 - Live on Sui mainnet today: read-only watch mode, with reads through Tatum's gRPC gateway.
 - Proven end to end on a **local fork of Sui mainnet**, with real Move execution and no real funds: fund, open, defence (risk ratio 2.999 → 3.999) and unwind (19.82 of 20 USDC returned). On the fork, rules come from a local file, not Walrus Memory.
-- Walrus Memory on mainnet is ready: Yojimbo's own delegate key authenticates to the mainnet relayer. 0 memories so far. **PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC.**
+- **Walrus Memory on mainnet is live: 14 memories** in `yojimbo-v1:0x923d5acc…556f` (Nov 10). The owner's rules and schedules (asleep 01:00–08:00 IST, recording today, flying Nov 12, weekends, a 3 USDC cap per defence, add collateral rather than close) were each stored by a chat-agent tool call, then recalled when the agent was asked what it remembers.
 - **PENDING:** the first mainnet transaction. The bot wallet `0x923d5acc7c895a8f9d27d1e0712b717e1682e4d6490d82f2894e598e88c5556f` exists and is unfunded, waiting for hub funding.
 
 ## How it uses Walrus Memory
@@ -37,11 +37,12 @@ Each bot wallet gets its own namespace, `yojimbo-v1:<bot address>`, through the 
 1. **Rules:** for example "if the risk ratio is at or below 3.2, deposit up to 5 USDC", with an alert ratio, an action, a USDC cap and a timeout default for ask-first mode.
 2. **Schedules:** recurring windows ("daily 01:00–08:00 Asia/Kolkata: guard alone"), including overnight weekday windows that carry Monday into Tuesday morning.
 3. **Overrides:** owner corrections and approvals, matched to later decisions by mode, ratio and price move. The newest similar override wins.
+5. **Forget (retire) memories:** Walrus is append-only, so "forget that rule" is itself a memory listing the retired IDs. Retired rules stop counting and show struck through in the app.
 4. **Event memories:** each defence, with the ratio before and after, SUI price and move, mode, action, outcome, digest and the IDs of the rules it followed. There is also a daily summary at the UTC date rollover.
 
 Before every decision, the watcher recalls schedules, rules and overrides by semantic query. Each decision shows the blob IDs it recalled. If memory is unavailable, or no recalled rule allows an action, Yojimbo does not defend. It fails closed and says **Setup required: Walrus Memory**.
 
-**Status:** Walrus Memory is ready on mainnet, with 0 memories so far. The event requires at least 10. Rules, schedules and overrides are stored only through the chat agent's tools. The shared OpenRouter free key hit its daily cap ("free-models-per-day") at 15:41 UTC on Nov 9, so the owner's rules go in after the reset. **PENDING: first rules are written after the OpenRouter daily reset, Nov 10 00:00 UTC.** The planned mainnet run then writes the rule, the schedule, the defence event, an owner override and the daily summary through the app. Mainnet blobs took over 60 s to certify, so each write waits up to 300 s. We will report the real count from the relayer, not an estimate.
+**Status: 14 memories on Walrus mainnet** (Nov 10, 01:15 UTC), all written through the chat agent's tools. The first pass exposed real agent mistakes: it dated one-time windows 2025, stored "weekends" as every day, and invented caps of 10,000 and 1,000,000 USDC for rules that named no amount. We fixed the agent (`d04e38e`): it now gets today's date, has a `weekends` schedule, refuses a cap above the hard limit and a window that has already ended, and ignores 0 for any threshold the owner never stated. Then the owner told it to forget the five wrong memories (one `retire` memory) and stored them again correctly. The funded mainnet run then adds the defence event, an owner override and the daily summary. Mainnet blobs took over 60 s to certify, so each write waits up to 300 s. We will report the real count from the relayer, not an estimate.
 
 ## How it uses Tatum
 

@@ -33,7 +33,9 @@ Each bot wallet gets its own Walrus Memory namespace, which holds four kinds of 
 
 Before each decision, the watcher recalls schedules, rules and overrides by semantic query. The decision card shows which memory blobs it used. If memory is unreachable, Yojimbo fails closed and does not defend.
 
-**Honest status: ready, but no memories yet.** Yojimbo's own delegate key on our Walrus Memory account authenticates to the mainnet relayer. Zero memories are stored so far, and the event requires at least ten. Rules only go in through the chat agent's tools, and the shared free OpenRouter key hit its daily cap at 15:41 UTC on November 9. So the first rules are written after the daily reset, at 00:00 UTC on November 10. Walrus mainnet blobs also took over 60 seconds to certify, so each write now waits up to five minutes.
+**Status: 14 memories on Walrus mainnet.** On November 10 the owner told Yojimbo their week in plain chat: asleep 01:00 to 08:00 India time, recording all day today, flying on the 12th, guard alone on weekends, never more than 3 USDC per defence, and add collateral rather than close. Each sentence became a tool call and a memory.
+
+The first pass went wrong in ways worth admitting. The model dated today's window 2025, stored "weekends" as every day (the schedule type had no weekends option), and filled caps nobody had said, one of them 1,000,000 USDC. So the server now tells the agent today's date, and refuses a cap above the hard limit and a window that has already ended. Walrus is append-only, so the owner's "forget those five" is itself a memory: a retire record listing their IDs. The five were then stored again correctly. Walrus mainnet blobs also took over 60 seconds to certify, so each write now waits up to five minutes.
 
 ## How it learned over time
 
