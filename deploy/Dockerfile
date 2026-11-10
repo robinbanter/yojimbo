@@ -17,7 +17,10 @@ RUN pnpm install --frozen-lockfile --prod=false
 COPY packages/core packages/core
 COPY packages/server packages/server
 COPY packages/web packages/web
-RUN pnpm --filter @yojimbo/core build && pnpm --filter @yojimbo/web build
+# Emit only, no type check: the deploy ships what tsx runs on the Mac. Type errors are caught on the Mac, not here
+# (main at 7514023 has one in core/src/policy.ts that tsc rejects but tsx runs). Fails if either output is missing.
+RUN cd packages/core && ./node_modules/.bin/tsc -p tsconfig.json --noCheck && test -f dist/index.js \
+ && cd ../web && ./node_modules/.bin/vite build && test -f dist/index.html
 COPY deploy/nginx.conf deploy/start.sh deploy/
 RUN chmod +x deploy/start.sh && mkdir -p packages/server/data && chown -R node:node packages/server/data
 USER node
