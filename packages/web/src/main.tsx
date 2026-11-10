@@ -240,6 +240,8 @@ function App() {
     stream.addEventListener('trace', (e) => setTrace((v) => [{ type: 'decision', ...JSON.parse((e as MessageEvent).data) }, ...v].slice(0, 30)));
     stream.addEventListener('event', (ev) => {
       void refresh();
+      void loadPositions();
+      void loadOrders();
       try {
         const e = JSON.parse((ev as MessageEvent).data);
         const pair = String(e.pool ?? 'SUI_USDC').replace('_', '/');
