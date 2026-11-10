@@ -52,3 +52,11 @@ test('a forgotten rule no longer drives the decision, and a 0 alert ratio does n
   assert.deepEqual(after.ruleIds, ['r0']);
   assert.ok(after.recalledBlobIds.includes('b2'));
 });
+test('the tightest remembered cap limits a defence whose rule names no amount', () => {
+ const uncapped: Memory = {version:'YOJIMBO_V1',kind:'rule',id:'below15',createdAt:'2026-11-10T00:00:00Z',text:'If the risk ratio falls below 1.5, add collateral',action:'deposit',belowRatio:1.5};
+ const cap: Memory = {version:'YOJIMBO_V1',kind:'rule',id:'cap3',createdAt:'2026-11-10T00:00:00Z',text:'Never spend more than 3 USDC on a single defence',action:'deposit',maxUsdc:3};
+ const d = decide([hit(uncapped),hit(cap)],{at:new Date('2026-11-10T12:00:00Z'),ratio:1.4,movePercent:0,suiPrice:2});
+ assert.equal(d.action,'deposit'); assert.equal(d.amountUsdc,3); assert.ok(d.ruleIds.includes('cap3'));
+ const alone = decide([hit(uncapped)],{at:new Date('2026-11-10T12:00:00Z'),ratio:1.4,movePercent:0,suiPrice:2});
+ assert.equal(alone.amountUsdc,10);
+});

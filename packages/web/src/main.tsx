@@ -458,7 +458,10 @@ function App() {
   const chosen = ruleMems
     .filter((r) => (posNum(r.belowRatio) == null || actsBelow <= r.belowRatio) && posNum(r.movePercent) == null)
     .sort((a, b) => (posNum(a.belowRatio) ?? 99) - (posNum(b.belowRatio) ?? 99))[0];
-  const engineUsdc = chosen && chosen.action !== 'ignore' ? posNum(chosen.maxUsdc) ?? 10 : null;
+  const ruleUsdc = chosen && chosen.action !== 'ignore' ? posNum(chosen.maxUsdc) ?? 10 : null;
+  // Same as the engine's decide(): the tightest cap any live rule names limits every defence.
+  const tightestCap = Math.min(...ruleMems.map((m) => posNum(m.maxUsdc) ?? Infinity));
+  const engineUsdc = ruleUsdc != null ? Math.min(ruleUsdc, tightestCap) : null;
   const upTo = engineUsdc != null ? Math.min(engineUsdc, caps?.perActionUsdc ?? engineUsdc) : null;
   const verb = chosen?.action === 'reduce' ? 'trims' : chosen?.action === 'repay' ? 'repays' : 'adds';
   const sleepSched = liveSchedules.find((h) => h.memory.recurrence === 'daily' && /sleep|asleep|night|bed/i.test(h.memory.text)) ?? liveSchedules.find((h) => h.memory.recurrence === 'daily');
