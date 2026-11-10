@@ -48,6 +48,7 @@ type Status = {
   fork?: { label: string; forkedAtCheckpoint: string; checkpoint: string; clockMs: number; writes: boolean } | null;
   watcherError: string | null;
   watcherCheckedAt?: string | null;
+  alertRatio?: number;
   pending: string[];
 };
 type Step = { name: string; kind: string; pending: boolean; error: string; args: [string, string][]; result: [string, string][] };
@@ -458,7 +459,8 @@ function App() {
   const tz = mostCommon(liveSchedules.map((h) => h.memory.timezone)) ?? 'Asia/Kolkata';
   const ruleMems = liveRules.filter((h) => h.memory.kind === 'rule').map((h) => h.memory as any);
   const statedAlert = ruleMems.filter((r) => posNum(r.alertRatio)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0]?.alertRatio as number | undefined;
-  const actsBelow: number = statedAlert ?? watched?.decision?.alertRatio ?? botWatched?.decision?.alertRatio ?? decision?.alertRatio ?? 1.5;
+  // The engine's personal alert: the newest stated alertRatio, else the server's YOJIMBO_ALERT_RATIO (default 1.5).
+  const actsBelow: number = statedAlert ?? status?.alertRatio ?? watched?.decision?.alertRatio ?? botWatched?.decision?.alertRatio ?? decision?.alertRatio ?? 1.5;
   const chosen = ruleMems
     .filter((r) => (posNum(r.belowRatio) == null || actsBelow <= r.belowRatio) && posNum(r.movePercent) == null)
     .sort((a, b) => (posNum(a.belowRatio) ?? 99) - (posNum(b.belowRatio) ?? 99))[0];
@@ -540,7 +542,7 @@ function App() {
           Skip to content
         </a>
         {forkBanner}
-        <Landing status={status} memoryCount={memory ? kept.length : null} memoryError={errors.memory} memorySetup={memorySetup} events={events} watched={watched} registry={registry} defenceCap={defenceCap} glance={glance} />
+        <Landing status={status} memoryCount={memory ? kept.length : null} memoryError={errors.memory} memorySetup={memorySetup} events={events} watched={visiblePosition} registry={registry} defenceCap={defenceCap} glance={glance} />
       </div>
     );
 
