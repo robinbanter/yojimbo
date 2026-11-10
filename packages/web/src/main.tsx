@@ -1846,10 +1846,15 @@ function PriceChart({ candles, price, lines }: { candles: Candle[] | null; price
       });
       series.current = c.addSeries(AreaSeries, { lineColor: '#141c3a', lineWidth: 2, topColor: 'rgba(20,28,58,0.14)', bottomColor: 'rgba(20,28,58,0)', priceLineVisible: false, lastValueVisible: true });
       chart.current = c;
+      // Keep the whole history in view when the panel resizes (for example when the assistant docks).
+      const ro = new ResizeObserver(() => c.timeScale().fitContent());
+      ro.observe(box.current);
+      (c as any).__ro = ro;
       setTick((t) => t + 1);
     });
     return () => {
       dead = true;
+      chart.current?.__ro?.disconnect();
       chart.current?.remove();
       chart.current = null;
       series.current = null;
