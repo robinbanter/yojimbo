@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import Anthropic from '@anthropic-ai/sdk';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -144,7 +145,39 @@ const toolSchemas=[
  ['record_override','Remember owner correction or approval for last defence',{text:{type:'string'},action:{type:'string',enum:['deposit','reduce','repay','ignore']},verdict:{type:'string',enum:['correction','approval']}}],
  ['simulate_defence','Recall rules and dry-run current defence',{}],['defend','Recall rules and execute current defence, gated by YOJIMBO_ALLOW_MAINNET',{}]
 ].map(([name,description,properties])=>({type:'function',function:{name,description,parameters:{type:'object',properties,additionalProperties:false}}}));
+// Claude path (used when ANTHROPIC_API_KEY is set): same OpenAI-shaped messages in and out, so the chat loop is unchanged.
+// The raw Claude content (thinking + tool_use blocks) rides along on _anthropic and is sent back unchanged.
+const claude=process.env.ANTHROPIC_API_KEY?new Anthropic():null;
+const CLAUDE_MODEL=process.env.YOJIMBO_CLAUDE_MODEL||'claude-haiku-5-5';
+function toClaude(messages:any[]):{system:string;messages:Anthropic.MessageParam[]}{
+ const system=messages.filter(m=>m.role==='system').map(m=>m.content).join('\n\n');const out:Anthropic.MessageParam[]=[];
+ for(const m of messages){
+  if(m.role==='system')continue;
+  if(m.role==='user'){out.push({role:'user',content:String(m.content)});continue;}
+  if(m.role==='assistant'){out.push({role:'assistant',content:m._anthropic??[{type:'text',text:String(m.content||'')},...(m.tool_calls||[]).map((c:any)=>({type:'tool_use' as const,id:c.id,name:c.function.name,input:JSON.parse(c.function.arguments||'{}')}))]});continue;}
+  if(m.role==='tool'){const block:Anthropic.ToolResultBlockParam={type:'tool_result',tool_use_id:m.tool_call_id,content:String(m.content)};const last=out[out.length-1];
+   // All results for one assistant turn go back in a single user message.
+   if(last?.role==='user'&&Array.isArray(last.content)&&last.content.every((b:any)=>b.type==='tool_result'))(last.content as Anthropic.ToolResultBlockParam[]).push(block);else out.push({role:'user',content:[block]});}
+ }
+ return {system,messages:out};
+}
+async function claudeChat(messages:any[],tools:any[]){
+ const {system,messages:claudeMessages}=toClaude(messages);
+ let response:Anthropic.Message;
+ try{response=await claude!.messages.create({model:CLAUDE_MODEL,max_tokens:4096,output_config:{effort:'low'},system,messages:claudeMessages,tools:tools.map(t=>({name:t.function.name,description:t.function.description,input_schema:t.function.parameters}))});}
+ catch(e){
+  if(e instanceof Anthropic.AuthenticationError)throw new Error('Claude API: the ANTHROPIC_API_KEY was rejected');
+  if(e instanceof Anthropic.RateLimitError)throw new Error('Claude API HTTP 429: rate-limited, try again in a minute');
+  if(e instanceof Anthropic.APIError)throw new Error(`Claude API HTTP ${e.status}: ${e.message}`);
+  throw e;
+ }
+ if(response.stop_reason==='refusal')throw new Error(`Claude declined this request${response.stop_details?.category?` (${response.stop_details.category})`:''}`);
+ const text=response.content.flatMap(b=>b.type==='text'?[b.text]:[]).join('');
+ const tool_calls=response.content.flatMap(b=>b.type==='tool_use'?[{id:b.id,type:'function',function:{name:b.name,arguments:JSON.stringify(b.input)}}]:[]);
+ return {role:'assistant',content:text,tool_calls:tool_calls.length?tool_calls:undefined,_anthropic:response.content};
+}
 async function openRouter(messages:any[],tools:any[]=toolSchemas){
+ if(claude)return claudeChat(messages,tools);
  if(!process.env.OPENROUTER_API_KEY)throw new Error('Setup required: OPENROUTER_API_KEY');
  const response=await fetch('https://openrouter.ai/api/v1/chat/completions',{method:'POST',headers:{'content-type':'application/json',Authorization:`Bearer ${process.env.OPENROUTER_API_KEY}`},body:JSON.stringify({model:process.env.YOJIMBO_MODEL||'nvidia/nemotron-3-ultra-550b-a55b:free',messages,tools,tool_choice:'auto'})});
  if(!response.ok)throw new Error((response.status===402?'OpenRouter HTTP 402: this key has no credits left. Top up OpenRouter or set YOJIMBO_MODEL to a :free model':response.status===429?'OpenRouter HTTP 429: the free model is rate-limited right now. Try again in a minute':`OpenRouter HTTP ${response.status}`));
@@ -214,7 +247,7 @@ const server=createServer(async(req,res)=>{try{
  if(path==='/stream'){res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache'});listeners.add(res);req.on('close',()=>listeners.delete(res));res.write(': connected\n\n');return;}
  if(path==='/status'){let address:string|null=null;try{address=owner();}catch{}let balance:string|null=null,usdcBalance:string|null=null;if(address){try{const client=chain(address).client;const balances=await Promise.all([client.core.getBalance({owner:address,coinType:'0x2::sui::SUI'}),client.core.getBalance({owner:address,coinType:'0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC'})]);balance=balances[0].balance.balance;usdcBalance=balances[1].balance.balance;}catch{}}
   const forkInfo=await forkLabel();
-  return json(res,200,{fork:forkInfo,rpc:forkInfo?forkInfo.label:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:!fork&&process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,watcherCheckedAt:lastCheckAt,alertRatio:Number(process.env.YOJIMBO_ALERT_RATIO??1.5),pending:[...pending.keys()]});}
+  return json(res,200,{fork:forkInfo,rpc:forkInfo?forkInfo.label:process.env.YOJIMBO_DEV_SUI_RPC?'dev RPC (not Tatum)':process.env.TATUM_API_KEY?'Tatum':'Setup required: TATUM_API_KEY',memory:process.env.MEMWAL_MAINNET_KEY&&process.env.MEMWAL_MAINNET_ACCOUNT_ID?'Walrus mainnet':'Setup required: MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID',telegram:process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID?'Telegram ready':'Setup required: TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID',openRouter:process.env.ANTHROPIC_API_KEY?`Claude (${CLAUDE_MODEL})`:process.env.OPENROUTER_API_KEY?'ready':'Setup required: OPENROUTER_API_KEY or ANTHROPIC_API_KEY',wallet:address,balanceMist:balance,usdcBalance,mainnetWrites:!fork&&process.env.YOJIMBO_ALLOW_MAINNET==='I_ACKNOWLEDGE_REAL_FUNDS'&&!process.env.YOJIMBO_DEV_SUI_RPC,watcherError,watcherCheckedAt:lastCheckAt,alertRatio:Number(process.env.YOJIMBO_ALERT_RATIO??1.5),pending:[...pending.keys()]});}
  if(path==='/registry')return json(res,200,await registry(process.env.YOJIMBO_BOT_KEY?owner():'0x1'));
  if(path==='/managers/recent')return json(res,200,{managers:await recentCached()});
  const watchMatch=/^\/watch\/(0x[0-9a-fA-F]{64})$/.exec(path);
