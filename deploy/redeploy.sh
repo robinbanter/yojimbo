@@ -23,7 +23,7 @@ echo "== building on the server (waits for /opt/hk/.build.lock, one build at a t
     echo 'build or start failed; last lines of /opt/hk/yojimbo-build.log:'; tail -40 /opt/hk/yojimbo-build.log; exit 1; fi"
 echo "== waiting for $URL/api/health"
 for i in $(seq 1 60); do
-  if curl -fsS -o /dev/null "$URL/api/health"; then break; fi
+  if curl -fs -o /dev/null "$URL/api/health"; then break; fi
   if [ "$i" = 60 ]; then echo "not healthy after 5 minutes; check: docker logs yojimbo-server-1 on the server"; exit 1; fi
   sleep 5
 done
