@@ -34,6 +34,7 @@ type EventRow = {
   ruleIds: string[];
   recalledBlobIds: string[];
   memoryBlobId?: string;
+  memoryError?: string;
 };
 type Status = {
   rpc: string;
@@ -54,7 +55,7 @@ type Message = { role: 'you' | 'yojimbo' | 'error'; text: string; at: string; st
 type RecentManager = { managerId: string; owner: string; pool: string; lastActivity: string; activity: string; riskRatio: number; liquidationRatio: number };
 type Cushion = { kind: 'none' } | { kind: 'at' } | { kind: 'move'; price: number; move: number; tier: 'danger' | 'watch' | 'safe' };
 type Tier = 'danger' | 'watch' | 'safe';
-type Route = 'home' | 'app' | 'memory' | 'log';
+type Route = 'home' | 'app' | 'memory' | 'log' | 'tx';
 
 const api = (path: string) =>
   fetch(`/api${path}`).then(async (r) => {
@@ -85,7 +86,7 @@ const setupVars = (v: string | null | undefined) => {
 const ratioText = (r: number) => (r >= 1000 ? '1000' : r.toFixed(3));
 
 /* ---------- tiny router ---------- */
-const routeOf = (p: string): Route => (p.startsWith('/app') ? 'app' : p.startsWith('/memory') ? 'memory' : p.startsWith('/log') ? 'log' : 'home');
+const routeOf = (p: string): Route => (p.startsWith('/app') ? 'app' : p.startsWith('/memory') ? 'memory' : p.startsWith('/log') ? 'log' : p.startsWith('/tx/') ? 'tx' : 'home');
 function usePath() {
   const [path, setPath] = useState(location.pathname);
   useEffect(() => {
@@ -144,6 +145,7 @@ function App() {
   const [watched, setWatched] = useState<any>(null);
   const [dryRun, setDryRun] = useState<{ ok: boolean; text: string } | null>(null);
   const [dryBusy, setDryBusy] = useState(false);
+  const [unwind, setUnwind] = useState<{ busy: boolean; error?: string; steps?: { step: string; txDigest: string | null; status: string | null }[]; done?: boolean } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [tick, setTick] = useState(() => Date.now());
@@ -245,6 +247,7 @@ function App() {
       app: 'Yojimbo · On guard',
       memory: 'Yojimbo · What it remembers',
       log: 'Yojimbo · Night log',
+      tx: 'Yojimbo · Fork transaction',
     };
     document.title = t[route];
   }, [route]);
@@ -375,6 +378,18 @@ function App() {
       setDryRun({ ok: false, text: String((e as Error).message ?? e) });
     } finally {
       setDryBusy(false);
+    }
+  };
+  const unwindFork = async () => {
+    if (unwind?.busy) return;
+    setUnwind({ busy: true });
+    try {
+      const r = await post('/bot/unwind', {});
+      setUnwind({ busy: false, steps: r.steps, done: r.done });
+    } catch (e) {
+      setUnwind({ busy: false, error: String((e as Error).message ?? e) });
+    } finally {
+      void refresh();
     }
   };
   const selectManager = (id: string) => {
@@ -741,6 +756,29 @@ function App() {
                     <b>{dryRun.ok ? 'Dry run' : 'Refused'}</b> {dryRun.text}
                   </p>
                 )}
+                {fork && source === 'bot' && position?.managerId && (hasDebt || unwind) && (
+                  <div className="dry">
+                    <button className="link-btn" onClick={unwindFork} disabled={!!unwind?.busy} data-film="unwind">
+                      {unwind?.busy ? 'Unwinding…' : 'Unwind on the fork'}
+                    </button>
+                    <span>sell SUI, repay, withdraw</span>
+                  </div>
+                )}
+                {unwind && !unwind.busy && (
+                  <ul className="jrun" role="status" data-film="unwind-result">
+                    {unwind.error && <li className="no">{unwind.error}</li>}
+                    {(unwind.steps ?? []).map((st, i) => (
+                      <li key={i} className={st.status === 'success' ? 'ok' : 'no'}>
+                        <b>{st.step}</b> {st.status ?? '—'}
+                        {st.txDigest && (
+                          <Link to={`/tx/${st.txDigest}`} className="ext">
+                            <span className="mono">{short(st.txDigest)}</span> <ForkTag />
+                          </Link>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {errors.registry && source === 'bot' && <p className="err-line">Registry: {errors.registry}</p>}
               </section>
 
@@ -1066,6 +1104,8 @@ function App() {
           </div>
         )}
 
+        {route === 'tx' && <TxPage digest={decodeURIComponent(path.slice(4))} />}
+
         {route === 'log' && (
           <div className="page">
             <header className="dash-head">
@@ -1113,8 +1153,7 @@ function App() {
                   {[...events]
                     .sort((a, b) => b.at.localeCompare(a.at))
                     .map((e) => {
-                      const followed = e.ruleIds.map((id) => hits.find((h) => h.memory.id === id)?.memory.text ?? id);
-                      return (
+                                            return (
                         <article className="event" key={e.id} data-film="event">
                           <div className="ev-what">
                             <b>
@@ -1130,15 +1169,27 @@ function App() {
                             </small>
                           </div>
                           <div className="ev-rule">
-                            {followed.length ? followed.map((t, i) => <q key={i}>{t}</q>) : <span className="fine">No rule</span>}
+                            {e.ruleIds.length ? (
+                              e.ruleIds.map((id) => {
+                                const h = hits.find((x) => x.memory.id === id);
+                                return (
+                                  <span key={id} className="ev-quote">
+                                    <q>{h?.memory.text ?? id}</q>
+                                    {h && <BlobLink id={h.blobId} />}
+                                  </span>
+                                );
+                              })
+                            ) : (
+                              <span className="fine">No rule</span>
+                            )}
                             <small>Recalled {e.recalledBlobIds.length} memories</small>
                           </div>
                           <div className="ev-links">
                             {e.txDigest &&
                               (fork || /fork/i.test(e.outcome) ? (
-                                <span className="ext" title="This transaction exists only on the local fork; it is not on Suiscan">
-                                  <span className="mono">{short(e.txDigest)}</span> <ForkTag />
-                                </span>
+                                <Link to={`/tx/${e.txDigest}`} className="ext" title="This transaction exists only on the local fork; it is not on Suiscan" data-film="event-tx">
+                                  <span className="mono">{short(e.txDigest)}</span> <ForkTag /> <Arrow />
+                                </Link>
                               ) : (
                                 <a className="ext" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/tx/${e.txDigest}`} data-film="event-tx">
                                   Transaction <ArrowOut />
@@ -1149,6 +1200,7 @@ function App() {
                                 Event memory <ArrowOut />
                               </a>
                             )}
+                            {!e.memoryBlobId && e.memoryError && <span className="fine">{/LOCAL FORK/.test(e.memoryError) ? 'Event memory not written on the fork' : `Event memory: ${e.memoryError.replace(/^Error:\s*/, '')}`}</span>}
                           </div>
                         </article>
                       );
@@ -1449,6 +1501,99 @@ const outcome = (r: any) => {
   return `${r.note ?? r.mode}${tx}${failed}`;
 };
 
+/** A LOCAL FORK transaction from the fork RPC (sui_getTransactionBlock): Suiscan cannot show fork transactions. */
+function TxPage({ digest }: { digest: string }) {
+  const [tx, setTx] = useState<any>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    setTx(null);
+    setErr('');
+    api(`/fork/tx/${digest}`).then(setTx, (e) => setErr(String((e as Error).message ?? e)));
+  }, [digest]);
+  const coin = (t: string) => (/::sui::SUI$/.test(t) ? 'SUI' : /::usdc::USDC$/i.test(t) ? 'USDC' : t.split('::').pop() ?? t);
+  const dec = (t: string) => (coin(t) === 'SUI' ? 9 : coin(t) === 'USDC' ? 6 : 0);
+  const typeShort = (t?: string) => (t ? t.replace(/0x[0-9a-f]{20,}/gi, (m) => short(m)).replace(/<.*>/, '<…>') : '');
+  return (
+    <div className="page">
+      <header className="dash-head">
+        <div>
+          <p className="lbl">
+            <ForkTag text="LOCAL FORK" /> of Sui mainnet · no real funds
+          </p>
+          <h1>Fork transaction</h1>
+          <p className="dash-sub mono">{digest}</p>
+        </div>
+        <Link to="/log" className="pill pill-line pill-sm">
+          Night log
+        </Link>
+      </header>
+      {err ? (
+        <State title="Couldn’t read this transaction" text={err} error />
+      ) : !tx ? (
+        <span className="skeleton mem-skel" aria-label="Reading the fork" />
+      ) : (
+        <section className="card tx-card" data-film="fork-tx">
+          <dl className="tx-kv">
+            <div>
+              <dt>Status</dt>
+              <dd className={tx.status?.status === 'success' ? 'ok' : 'bad'}>{tx.status?.status ?? '—'}{tx.status?.error ? ` · ${tx.status.error}` : ''}</dd>
+            </div>
+            <div>
+              <dt>Network</dt>
+              <dd>{tx.source}{tx.forkedAtCheckpoint ? ` @ checkpoint ${tx.forkedAtCheckpoint}` : ''}</dd>
+            </div>
+            <div>
+              <dt>Checkpoint</dt>
+              <dd className="mono">{tx.checkpoint ?? '—'}</dd>
+            </div>
+            <div>
+              <dt>Sender</dt>
+              <dd className="mono">{tx.sender ? short(tx.sender) : '—'}</dd>
+            </div>
+            <div>
+              <dt>Gas</dt>
+              <dd>{(tx.gasMist / 1e9).toFixed(6)} SUI</dd>
+            </div>
+            <div>
+              <dt>Move calls</dt>
+              <dd className="mono">{tx.calls.length ? tx.calls.join(' · ') : '—'}</dd>
+            </div>
+          </dl>
+          {tx.balanceChanges.length > 0 && (
+            <>
+              <h2 className="tx-h">Balance changes</h2>
+              <ul className="tx-list">
+                {tx.balanceChanges.map((b: any, i: number) => (
+                  <li key={i}>
+                    <span className="mono">{b.owner === 'shared' ? 'shared' : short(b.owner)}</span>
+                    <b className={Number(b.amount) < 0 ? 'bad' : 'ok'}>
+                      {(Number(b.amount) / 10 ** dec(b.coinType)).toLocaleString('en-US', { maximumFractionDigits: 6, signDisplay: 'always' })} {coin(b.coinType)}
+                    </b>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {tx.objectChanges.length > 0 && (
+            <>
+              <h2 className="tx-h">Objects</h2>
+              <ul className="tx-list">
+                {tx.objectChanges.map((o: any, i: number) => (
+                  <li key={i}>
+                    <span className="tx-type">{o.type}</span>
+                    <span className="mono">{typeShort(o.objectType)}</span>
+                    <span className="mono">{o.objectId ? short(o.objectId) : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
 /** Setup in three lines: fund the bot wallet, open the position, tell it the rules. Yojimbo acts only through its
  * own wallet because DeepBook Margin keeps a manager's caps inside the MarginManager and checks the sender. */
 function Journey(props: {
@@ -1470,7 +1615,7 @@ function Journey(props: {
   const [deposit, setDeposit] = useState('6');
   const [borrow, setBorrow] = useState('3');
   const [copied, setCopied] = useState(false);
-  const [run, setRun] = useState<{ busy: boolean; lines: { label: string; text: string; ok: boolean }[] } | null>(null);
+  const [run, setRun] = useState<{ busy: boolean; lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[] } | null>(null);
   const wallet = status?.wallet ?? null;
   const d = Number(deposit),
     b = Number(borrow);
@@ -1500,19 +1645,19 @@ function Journey(props: {
   };
   const open = async () => {
     if (!wallet || problem || run?.busy) return;
-    const lines: { label: string; text: string; ok: boolean }[] = [];
+    const lines: { label: string; text: string; ok: boolean; digest?: string; fork?: boolean }[] = [];
     setRun({ busy: true, lines });
     try {
       if (!hasManager) {
         const r = await post('/bot/create', {});
-        lines.push({ label: 'Create the MarginManager', text: outcome(r), ok: sent(r) });
+        lines.push({ label: 'Create the MarginManager', text: outcome(r), ok: sent(r), digest: r.txDigest, fork: r.mode === 'fork' });
         if (!sent(r)) {
           lines.push({ label: 'Deposit, borrow and buy SUI', text: 'Not run: the manager only exists on chain once the create transaction is sent.', ok: false });
           return;
         }
       }
       const o = await post('/bot/open', { depositUsdc: d, borrowUsdc: b });
-      lines.push({ label: 'Deposit, borrow and buy SUI', text: outcome(o), ok: sent(o) });
+      lines.push({ label: 'Deposit, borrow and buy SUI', text: outcome(o), ok: sent(o), digest: o.txDigest, fork: o.mode === 'fork' });
     } catch (e) {
       lines.push({ label: 'Refused', text: String((e as Error).message ?? e), ok: false });
     } finally {
@@ -1587,16 +1732,26 @@ function Journey(props: {
             <button className="pill pill-navy" onClick={open} disabled={!wallet || !!problem || run?.busy} data-film="open-position">
               {!status ? 'Checking…' : !wallet ? 'Setup required: YOJIMBO_BOT_KEY' : run?.busy ? 'Building…' : hasManager ? 'Open the position' : 'Create manager and open'}
             </button>
-            {run && run.lines.length > 0 && (
-              <ul className="jrun" role="status">
-                {run.lines.map((l, i) => (
-                  <li key={i} className={l.ok ? 'ok' : 'no'}>
-                    <b>{l.label}</b> {l.text}
-                  </li>
-                ))}
-              </ul>
-            )}
           </>
+        )}
+        {run && run.lines.length > 0 && (
+          <ul className="jrun" role="status">
+            {run.lines.map((l, i) => (
+              <li key={i} className={l.ok ? 'ok' : 'no'}>
+                <b>{l.label}</b> {l.text}
+                {l.digest && l.fork && (
+                  <Link to={`/tx/${l.digest}`} className="ext" data-film="open-tx">
+                    Fork transaction <Arrow />
+                  </Link>
+                )}
+                {l.digest && !l.fork && (
+                  <a className="ext" href={`https://suiscan.xyz/mainnet/tx/${l.digest}`} target="_blank" rel="noreferrer">
+                    SuiScan <ArrowOut />
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
         )}
       </li>
 
