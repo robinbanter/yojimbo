@@ -78,9 +78,11 @@ https://github.com/nickthelegend/yojimbo (secret scan passed Nov 10; Nick approv
 
 ## MEMWAL_AGENT_ID
 
-`0xd2ca3cbe1bd663a5fe7df7c14590451bbc712255cfee59966b0b8413cdaa335a`
+`2b4e3b5934b41a0e2f99cc6c8ad582e2f20faff512b57dcdef0e6bd049b39f36`
 
-This is the Walrus Memory account ID. The code reads it as `MEMWAL_MAINNET_ACCOUNT_ID`. It is public and on chain: the relayer's `GET /config` gives package `0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5`, and its `account::DelegateKeyAdded` events list Yojimbo's delegate key (label "Web App") under this account. The owner is `0x0cff6ac3b0396c3b449de58472dcf9cfd55f0bb2aefaca92c43315de128c7e93`. One account serves Yojimbo, Eidolon and Nakama, and each app signs with its own delegate key.
+This is the public half of Yojimbo's own Walrus Memory delegate key (the form asks for the agent's delegate public key; the dashboard at memory.walrus.xyz lists it under Delegate keys).
+
+Account ID (SUI): `0xd2ca3cbe1bd663a5fe7df7c14590451bbc712255cfee59966b0b8413cdaa335a`. This is the Walrus Memory account ID. The code reads it as `MEMWAL_MAINNET_ACCOUNT_ID`. It is public and on chain: the relayer's `GET /config` gives package `0xe7c16fbea0560e7057e2bf7422feaa4fb313749fc69c9e9092fac7a33b81d7f5`, and its `account::DelegateKeyAdded` events list Yojimbo's delegate key (label "Web App") under this account. The owner is `0x0cff6ac3b0396c3b449de58472dcf9cfd55f0bb2aefaca92c43315de128c7e93`. One account serves Yojimbo, Eidolon and Nakama, and each app signs with its own delegate key.
 
 ## Blog post
 
