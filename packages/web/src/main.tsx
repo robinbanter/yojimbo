@@ -84,7 +84,7 @@ const setupVars = (v: string | null | undefined) => {
   const m = /^Setup required:\s*(.+)$/.exec(v ?? '');
   return m ? m[1] : '';
 };
-const ratioText = (r: number) => (r >= 1000 ? '1000' : r.toFixed(3));
+const ratioText = (r: number) => (r >= 1000 ? '999+' : r.toFixed(3));
 
 /* ---------- tiny router ---------- */
 const routeOf = (p: string): Route => (p.startsWith('/app') ? 'app' : p.startsWith('/memory') ? 'memory' : p.startsWith('/log') ? 'log' : p.startsWith('/tx/') ? 'tx' : 'home');
@@ -153,6 +153,7 @@ function App() {
   const [botWatched, setBotWatched] = useState<any>(null);
   const autoBot = useRef(false);
 
+  const hadMemory = useRef(false);
   const refresh = async () => {
     const requests: [string, string, (v: any) => void][] = [
       ['status', '/status', setStatus],
@@ -164,6 +165,7 @@ function App() {
         (v) => {
           setMemory(v.hits);
           setDecision(v.decision);
+          if (Array.isArray(v.hits) && v.hits.length) hadMemory.current = true;
         },
       ],
       ['events', '/events', (v) => setEvents(v.events)],
@@ -175,6 +177,8 @@ function App() {
           save(await api(path));
           setErrors((e) => ({ ...e, [name]: '' }));
         } catch (e) {
+          // A failed refresh keeps the last good memories on screen; only a first load that never succeeded shows the error.
+          if (name === 'memory' && hadMemory.current) return;
           setErrors((v) => ({ ...v, [name]: String((e as Error).message ?? e) }));
         }
       }),
@@ -339,6 +343,8 @@ function App() {
   const where = fork ? 'the local fork' : 'Sui mainnet';
   const state = visiblePosition?.state;
   const ratio: number | undefined = state?.riskRatio;
+  // With no debt the chain reports its sentinel ratio (1000); the UI shows "No debt" instead of that number.
+  const noDebt = !!state && Number(state.baseDebt) === 0 && Number(state.quoteDebt) === 0;
   const alert = visibleDecision?.alertRatio ?? 1.5;
   const liquidation: number | undefined = visibleRegistry?.liquidation;
   const minBorrow: number | undefined = visibleRegistry?.minBorrow;
@@ -521,7 +527,7 @@ function App() {
         <span className="glance-beat">{beat}</span>
       </div>
       <div className="glance-row">
-        <Gauge ratio={state ? Number(ratio) : null} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && !!watchId && !errors.watch} />
+        <Gauge ratio={state ? Number(ratio) : null} noDebt={noDebt} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && !!watchId && !errors.watch} />
         <div className="glance-text">
           <p className={`glance-word g-${guardTone}`}>
             {guardWord}
@@ -627,7 +633,7 @@ function App() {
             {/* (1) The guard at a glance */}
             <section className={`card guard-hero ${tier ? `is-${tier}` : ''}`} id="position" aria-labelledby="guard-title" data-film="position">
               <div className="gh-grid">
-                <Gauge ratio={state ? Number(ratio) : null} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && source === 'watch' && !!watchId && !errors.watch} />
+                <Gauge ratio={state ? Number(ratio) : null} noDebt={noDebt} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && source === 'watch' && !!watchId && !errors.watch} />
                 <div className="gh-mid">
                   <div className="seg" role="group" aria-label="Position source">
                     <button aria-pressed={source === 'watch'} className={source === 'watch' ? 'on' : ''} onClick={() => setSource('watch')}>
@@ -694,7 +700,7 @@ function App() {
                           {!managers.some((m) => m.managerId === watchId) && watchId && <option value={watchId}>{short(watchId)} · pasted</option>}
                           {managers.map((m) => (
                             <option key={m.managerId} value={m.managerId}>
-                              {short(m.managerId)} · ratio {m.riskRatio >= 1000 ? '1000 (max)' : m.riskRatio.toFixed(3)} · {ago(m.lastActivity)}
+                              {short(m.managerId)} · {m.riskRatio >= 1000 ? 'no debt' : `ratio ${m.riskRatio.toFixed(3)}`} · {ago(m.lastActivity)}
                             </option>
                           ))}
                         </select>
@@ -1920,7 +1926,8 @@ const BlobLink = ({ id }: { id: string }) =>
 /** A semicircle risk meter: Liquidation (at or under the pool's line), Alert (up to the line where Yojimbo acts), Safe.
  * Log scale so the zones near liquidation stay readable; a ratio past the top (the chain caps it at 1000) pins right.
  * The marker and number ease to each new live read. */
-function Gauge({ ratio, liquidation, actsBelow, tier, loading }: { ratio: number | null; liquidation?: number; actsBelow: number; tier: Tier | null; loading: boolean }) {
+function Gauge({ ratio: raw, noDebt, liquidation, actsBelow, tier, loading }: { ratio: number | null; noDebt?: boolean; liquidation?: number; actsBelow: number; tier: Tier | null; loading: boolean }) {
+  const ratio = noDebt ? null : raw;
   const liq = liquidation ?? 1.1;
   const lo = liq * 0.9,
     hi = Math.max(actsBelow * 2.4, liq * 3);
@@ -1981,7 +1988,7 @@ function Gauge({ ratio, liquidation, actsBelow, tier, loading }: { ratio: number
   };
   return (
     <div className={`gauge ${tier ? `t-${tier}` : ''}`} data-film="gauge">
-      <svg viewBox="0 0 320 178" role="img" aria-label={ratio != null ? `Risk ratio ${ratioText(ratio)}. Liquidation at ${liq.toFixed(2)}, Yojimbo acts below ${actsBelow.toFixed(2)}.` : 'No position read yet'}>
+      <svg viewBox="0 0 320 178" role="img" aria-label={ratio != null ? `Risk ratio ${ratioText(ratio)}. Liquidation at ${liq.toFixed(2)}, Yojimbo acts below ${actsBelow.toFixed(2)}.` : noDebt ? 'No debt, nothing to guard' : 'No position read yet'}>
         <path d={arc(0, 1)} className="g-track" />
         {ratio != null && (
           <>
@@ -2003,9 +2010,16 @@ function Gauge({ ratio, liquidation, actsBelow, tier, loading }: { ratio: number
         {ratio != null ? (
           <>
             <b className="num" data-film="ratio">
-              {ratio >= 1000 ? '1000' : (shown ?? ratio).toFixed(3)}
+              {ratio >= 1000 ? '999+' : (shown ?? ratio).toFixed(3)}
             </b>
-            <span>risk ratio{ratio >= 1000 ? ' · chain max' : ''}</span>
+            <span>risk ratio</span>
+          </>
+        ) : noDebt ? (
+          <>
+            <b className="g-calm" data-film="ratio">
+              No debt
+            </b>
+            <span>nothing to guard</span>
           </>
         ) : loading ? (
           <span className="skeleton g-skel" aria-label="Reading the position" />

@@ -274,6 +274,8 @@ code { color: var(--navy-3); }
 .g-center { position: absolute; left: 0; right: 0; bottom: 18px; display: grid; justify-items: center; gap: 2px; text-align: center; }
 .g-center b { font-size: 64px; font-weight: 800; letter-spacing: -.055em; line-height: .95; color: var(--navy); }
 .g-center b.g-none { color: var(--line-3); }
+.g-center b.g-calm { font-size: 40px; letter-spacing: -.04em; color: var(--ok); }
+.glance .g-center b.g-calm { font-size: 20px; }
 .g-center span { font: 700 10.5px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 .g-skel { width: 150px; height: 60px; }
 .g-legend { display: flex; justify-content: center; gap: 16px; margin: 6px 6px 0; font: 700 10.5px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
