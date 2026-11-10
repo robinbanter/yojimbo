@@ -1,7 +1,21 @@
 import { GrpcTransport } from '@protobuf-ts/grpc-transport';
+import type { RpcInterceptor } from '@protobuf-ts/runtime-rpc';
 import { rateLimit } from './throttle.js';
 // One limiter for the whole process: every Tatum client shares Tatum's 3 requests/second budget.
 const tatumLimit = rateLimit(400);
+// Tatum credits can run out (HTTP 402 "You have used all your credits"). SUI_RPC_FALLBACK=public, or the first 402 a
+// Tatum call returns, sends every later read to the public Sui fullnode, labelled so /status never claims Tatum.
+export const PUBLIC_FALLBACK_LABEL = 'public Sui node (Tatum credits exhausted)' as const;
+const PUBLIC_FULLNODE = 'https://fullnode.mainnet.sui.io:443';
+let tatumExhausted = false;
+const usePublicFallback = (env = process.env) => env.SUI_RPC_FALLBACK === 'public' || tatumExhausted;
+const tatumWatch: RpcInterceptor = {
+  interceptUnary(next, method, input, options) {
+    const call = next(method, input, options);
+    call.response.catch((e: unknown) => { if (/HTTP status code 402/.test(String(e))) tatumExhausted = true; });
+    return call;
+  },
+};
 import { ChannelCredentials } from '@grpc/grpc-js';
 import { SuiGrpcClient } from '@mysten/sui/grpc';
 import { deepbook, mainnetPackageIds, mainnetCoins, mainnetPools } from '@mysten/deepbook-v3';
@@ -53,9 +67,10 @@ export function rpc(env = process.env) {
   const dev = Boolean(env.YOJIMBO_DEV_SUI_RPC);
   if (!dev && !env.TATUM_API_KEY) throw new Error('Setup required: TATUM_API_KEY');
   if (dev) { const url=env.YOJIMBO_DEV_SUI_RPC!; return {client:new SuiGrpcClient({network:'mainnet',baseUrl:url}), source:'dev RPC (not Tatum)' as const, url}; }
+  if (usePublicFallback(env)) return {client:new SuiGrpcClient({network:'mainnet',baseUrl:PUBLIC_FULLNODE}), source:PUBLIC_FALLBACK_LABEL, url:PUBLIC_FULLNODE};
   // Tatum's Sui JSON-RPC gateway returns 404; it serves native gRPC (not gRPC-web) with the key in metadata.
   const host = 'sui-mainnet-grpc.gateway.tatum.io:443';
-  const transport = new GrpcTransport({host,channelCredentials:ChannelCredentials.createSsl(),meta:{'x-api-key':env.TATUM_API_KEY!},interceptors:[tatumLimit]});
+  const transport = new GrpcTransport({host,channelCredentials:ChannelCredentials.createSsl(),meta:{'x-api-key':env.TATUM_API_KEY!},interceptors:[tatumLimit,tatumWatch]});
   return {client:new SuiGrpcClient({network:'mainnet',transport}), source:'Tatum' as const, url:`grpc://${host}`};
 }
 /**
