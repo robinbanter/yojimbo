@@ -856,3 +856,4 @@ a.ext:hover .ico { transform: translateX(2px); }
 @media (max-width: 1100px) { .hhead { display: none; } .hrow { grid-template-columns: minmax(0, 1fr) auto; } .grow { grid-template-columns: minmax(0, 1fr); } }
 .dock-chips { padding: 10px 12px 0; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .dock-chips .chip { white-space: nowrap; min-height: 38px; font-size: 13px; }
+.pair-menu span.tok { flex: none; display: inline-grid; }
