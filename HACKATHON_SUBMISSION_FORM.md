@@ -74,7 +74,7 @@ https://github.com/nickthelegend/yojimbo (secret scan passed Nov 10; Nick approv
 
 ## Tatum account ID
 
-`6af1b0a07614eea902da0ee6` (Nick's Tatum account, given Nov 10).
+`6af1b0a07614eea902da0ee6` (Yojimbo's own Tatum account; each entry has its own).
 
 ## MEMWAL_AGENT_ID
 
