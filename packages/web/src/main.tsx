@@ -46,6 +46,7 @@ type Status = {
   mainnetWrites: boolean;
   fork?: { label: string; forkedAtCheckpoint: string; checkpoint: string; clockMs: number; writes: boolean } | null;
   watcherError: string | null;
+  watcherCheckedAt?: string | null;
   pending: string[];
 };
 type Step = { name: string; kind: string; pending: boolean; error: string; args: [string, string][]; result: [string, string][] };
@@ -144,7 +145,8 @@ function App() {
   const [dryRun, setDryRun] = useState<{ ok: boolean; text: string } | null>(null);
   const [dryBusy, setDryBusy] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
-  const [journeyOpen, setJourneyOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [tick, setTick] = useState(() => Date.now());
   const [botWatched, setBotWatched] = useState<any>(null);
   const autoBot = useRef(false);
 
@@ -189,6 +191,10 @@ function App() {
       clearInterval(id);
       stream.close();
     };
+  }, []);
+  useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(id);
   }, []);
   useEffect(() => {
     if (source === 'watch' && !watchId && managers?.length) setWatchId(managers[0].managerId);
@@ -353,12 +359,9 @@ function App() {
     return { kind: 'move', price, move, tier: Math.abs(move) < 0.03 ? 'danger' : Math.abs(move) < 0.1 ? 'watch' : 'safe' };
   })();
   const tier: Tier | null = cushion ? (cushion.kind === 'move' ? cushion.tier : cushion.kind === 'at' ? 'danger' : 'safe') : null;
-  const tierWord = tier === 'danger' ? (cushion?.kind === 'at' ? 'Liquidatable' : 'Danger') : tier === 'watch' ? 'Watch' : tier === 'safe' ? 'Safe' : '';
   const hits = memory ?? [];
   const gone = new Set<string>(hits.flatMap((h) => (h.memory.kind === 'retire' && Array.isArray(h.memory.ids) ? h.memory.ids : [])));
   const kept = hits.filter((h) => ['schedule', 'rule', 'override', 'retire'].includes(h.memory.kind));
-  const activeOf = (kinds: string[]) =>
-    kept.filter((h) => kinds.includes(h.memory.kind) && !gone.has(h.memory.id)).sort((a, b) => String(b.memory.createdAt).localeCompare(String(a.memory.createdAt)));
   const memorySetup = !!status?.memory?.startsWith('Setup required');
   const atLiq = (managers ?? []).filter((m) => m.riskRatio <= m.liquidationRatio);
   const dryRunDefence = async () => {
@@ -442,24 +445,58 @@ function App() {
       </div>
     );
 
-  // Protection settings, all from live state: the alert ratio from the rule engine, the caps from the server, the
-  // rule and schedule texts from the newest active Walrus memories.
-  const rules = activeOf(['override', 'rule']);
-  const schedules = activeOf(['schedule']);
+  // The guard at a glance, all from live state. The trigger and amount repeat the rule engine's own choice
+  // (packages/core/src/policy.ts decide): the newest stated alert ratio (else the server default), and the matching
+  // rule with the lowest threshold, its stated max (else 10) clamped by the server's per-defence cap.
+  const liveHits = kept.filter((h) => h.memory.kind !== 'retire' && !gone.has(h.memory.id));
+  const liveRules = liveHits.filter((h) => h.memory.kind === 'rule' || h.memory.kind === 'override');
+  const liveSchedules = liveHits.filter((h) => h.memory.kind === 'schedule') as unknown as SchedHit[];
+  const tz = mostCommon(liveSchedules.map((h) => h.memory.timezone)) ?? 'Asia/Kolkata';
+  const ruleMems = liveRules.filter((h) => h.memory.kind === 'rule').map((h) => h.memory as any);
+  const statedAlert = ruleMems.filter((r) => posNum(r.alertRatio)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0]?.alertRatio as number | undefined;
+  const actsBelow: number = statedAlert ?? watched?.decision?.alertRatio ?? botWatched?.decision?.alertRatio ?? decision?.alertRatio ?? 1.5;
+  const chosen = ruleMems
+    .filter((r) => (posNum(r.belowRatio) == null || actsBelow <= r.belowRatio) && posNum(r.movePercent) == null)
+    .sort((a, b) => (posNum(a.belowRatio) ?? 99) - (posNum(b.belowRatio) ?? 99))[0];
+  const engineUsdc = chosen && chosen.action !== 'ignore' ? posNum(chosen.maxUsdc) ?? 10 : null;
+  const upTo = engineUsdc != null ? Math.min(engineUsdc, caps?.perActionUsdc ?? engineUsdc) : null;
+  const verb = chosen?.action === 'reduce' ? 'trims' : chosen?.action === 'repay' ? 'repays' : 'adds';
+  const sleepSched = liveSchedules.find((h) => h.memory.recurrence === 'daily' && /sleep|asleep|night|bed/i.test(h.memory.text)) ?? liveSchedules.find((h) => h.memory.recurrence === 'daily');
   const hasDebt = Number(position?.state?.quoteDebt) > 0 || Number(position?.state?.baseDebt) > 0;
-  const guard: { word: string; tone: 'ok' | 'warn' | 'off' | 'muted'; note: string } =
+  const guardWord =
     source === 'watch'
-      ? { word: 'Watching only', tone: 'muted', note: 'This position is not the bot’s. Yojimbo can read it, not act on it.' }
+      ? 'Watching'
       : !status
-        ? { word: 'Checking…', tone: 'muted', note: '' }
+        ? 'Checking…'
         : !status.wallet
-          ? { word: 'Guard off', tone: 'off', note: 'Setup required: YOJIMBO_BOT_KEY' }
+          ? 'Not set up'
           : !hasDebt
-            ? { word: 'Guard off', tone: 'off', note: 'The bot wallet has no open position yet.' }
+            ? 'Not guarding yet'
             : writesLive
-              ? { word: 'Guard on', tone: 'ok', note: fork ? 'Real transactions on the local fork only.' : 'It will send real defences on Sui mainnet.' }
-              : { word: 'Guard on · dry-run', tone: 'warn', note: 'It simulates each defence and sends nothing.' };
+              ? 'Guarding'
+              : 'Guarding · dry-run';
+  const guardTone = source === 'watch' ? 'muted' : !status ? 'muted' : !status.wallet || !hasDebt ? 'off' : writesLive ? 'ok' : 'warn';
+  const statusParts = [
+    `acts below ${actsBelow.toFixed(2)}`,
+    memory === null ? null : upTo != null ? `${verb} up to ${upTo} USDC` : 'no rule to act on yet',
+    sleepSched ? `asleep ${sleepSched.memory.start}–${sleepSched.memory.end} ${tzLabel(sleepSched.memory.timezone)}` : null,
+  ].filter(Boolean) as string[];
   const telegramOn = !!status && !status.telegram.startsWith('Setup');
+  const checkedAt: string | null = source === 'watch' ? watched?.checkedAt ?? null : status?.watcherCheckedAt ?? null;
+  const beat = checkedAt
+    ? `${source === 'watch' ? 'Read' : 'Watcher checked'} ${agoShort(tick - new Date(checkedAt).getTime())} ago${
+        source === 'bot' && status?.watcherError ? (/bot-owned MarginManager/.test(status.watcherError) ? ' · no bot position yet' : ' · read failed') : ''
+      }`
+    : source === 'watch' && watchId
+      ? 'Reading…'
+      : 'Waiting for the first check';
+  const pose = tier === 'danger' || (ratio != null && ratio <= actsBelow) ? POSE.alert : POSE.seated;
+  const steps3 = steps4.slice(0, 3);
+  const nextStep = steps3.findIndex((s) => s !== 'done');
+  const ruleChips = liveRules
+    .slice()
+    .sort((a, b) => String(b.memory.createdAt).localeCompare(String(a.memory.createdAt)))
+    .slice(0, 4);
 
   return (
     <div className={`app ${fork ? 'has-fork' : ''}`}>
@@ -517,64 +554,109 @@ function App() {
         )}
 
         {route === 'app' && (
-          <div className="page">
-            <header className="dash-head">
-              <div>
-                <p className="lbl">
-                  <span className={`live-dot ${fork ? 'fork' : ''}`} aria-hidden="true" />
-                  SUI/USDC on DeepBook Margin · read from {where} every 15 s
-                </p>
-                <h1>On guard</h1>
-                <p className="dash-sub">A bodyguard for your leverage while you sleep. It follows only the rules you gave it.</p>
-              </div>
-              <button className="pill pill-line pill-sm" aria-expanded={journeyOpen} aria-controls="journey" onClick={() => setJourneyOpen((v) => !v)}>
-                {journeyOpen ? 'Hide setup' : 'Get guarded in 4 steps'}
+          <div className="page page-guard">
+            {/* Slim setup: only the next step, the rest in a drawer. */}
+            <div className={`setup-bar ${nextStep === -1 ? 'is-done' : ''}`} data-film="setup">
+              <ol className="setup-steps" aria-label="Set up">
+                {SETUP_SHORT.map((t, i) => (
+                  <li key={t} className={`s-${steps3[i]} ${i === nextStep ? 'next' : ''}`}>
+                    <i aria-hidden="true">{steps3[i] === 'done' ? <Check /> : i + 1}</i>
+                    {t}
+                  </li>
+                ))}
+              </ol>
+              <p className="setup-next">{nextStep === -1 ? 'Set up' : `Next: ${SETUP_NEXT[nextStep]}`}</p>
+              <button className="pill pill-line pill-sm" aria-expanded={setupOpen} aria-controls="setup-drawer" onClick={() => setSetupOpen((v) => !v)}>
+                {setupOpen ? 'Close' : 'Set up'}
               </button>
-            </header>
-            {journeyOpen && (
-              <section className="card" id="journey" aria-label="Get guarded in 4 steps">
+            </div>
+            {setupOpen && (
+              <section className="card setup-drawer" id="setup-drawer" aria-label="Set up">
                 {journey('panel')}
               </section>
             )}
 
-            <div className="dash-grid">
-              <div className="dash-main">
-                {/* (1) Position */}
-                <section className={`card pos-card ${tier ? `is-${tier}` : ''}`} id="position" aria-labelledby="position-title" data-film="position">
-                  <div className="card-title">
-                    <div>
-                      <p className="lbl">Position</p>
-                      <h2 id="position-title">{source === 'watch' ? 'Watched position' : 'Your position'}</h2>
-                    </div>
-                    <div className="seg" role="group" aria-label="Position source">
-                      <button aria-pressed={source === 'watch'} className={source === 'watch' ? 'on' : ''} onClick={() => setSource('watch')}>
-                        Watch any
-                      </button>
-                      <button aria-pressed={source === 'bot'} className={source === 'bot' ? 'on' : ''} onClick={() => setSource('bot')} data-film="source-bot">
-                        Bot wallet
-                      </button>
-                    </div>
+            {/* (1) The guard at a glance */}
+            <section className={`card guard-hero ${tier ? `is-${tier}` : ''}`} id="position" aria-labelledby="guard-title" data-film="position">
+              <div className="gh-grid">
+                <Gauge ratio={state ? Number(ratio) : null} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && source === 'watch' && !!watchId && !errors.watch} />
+                <div className="gh-mid">
+                  <div className="seg" role="group" aria-label="Position source">
+                    <button aria-pressed={source === 'watch'} className={source === 'watch' ? 'on' : ''} onClick={() => setSource('watch')}>
+                      Watch any
+                    </button>
+                    <button aria-pressed={source === 'bot'} className={source === 'bot' ? 'on' : ''} onClick={() => setSource('bot')} data-film="source-bot">
+                      Bot wallet
+                    </button>
                   </div>
+                  <h1 id="guard-title" className={`gh-word g-${guardTone}`} data-film="protection">
+                    {guardWord}
+                  </h1>
+                  <p className="gh-status" data-film="status-line">
+                    {statusParts.join(' · ')}
+                  </p>
+                  <p className="gh-beat" data-film="heartbeat" aria-live="polite">
+                    <span className={`beat ${checkedAt ? 'on' : ''}`} aria-hidden="true" />
+                    {beat}
+                    <span className="gh-tg">
+                      <span className={`dot ${telegramOn ? 'ok' : 'warn'}`} aria-hidden="true" />
+                      {!status ? '…' : telegramOn ? 'Telegram on' : 'Telegram: setup required'}
+                    </span>
+                  </p>
+                  {cushion && cushion.kind === 'move' && (
+                    <p className="gh-cushion">
+                      SUI can {cushion.move < 0 ? 'fall' : 'rise'} <b className="gold-num">{Math.abs(cushion.move * 100).toFixed(1)}%</b> before liquidation
+                    </p>
+                  )}
+                  {cushion && cushion.kind === 'at' && <p className="gh-cushion bad">At the liquidation line now.</p>}
+                  {!state && source === 'watch' && watchError && <p className="err-line">{watchError}</p>}
+                  {!state && source === 'bot' && <p className="gh-cushion">{status && !status.wallet ? 'Setup required: YOJIMBO_BOT_KEY' : 'No open position yet. Set up step 2 opens one.'}</p>}
+                </div>
+                <figure className="gh-art">
+                  <img src={pose.src} alt={pose.alt} width={768} height={768} />
+                </figure>
+              </div>
+              <DayStrip schedules={liveSchedules} events={events ?? []} tz={tz} now={tick} days={1} />
+            </section>
 
-                  {source === 'watch' && (
-                    <div className="picker">
-                      {managers === null && !errors.managers ? (
-                        <span className="skeleton picker-skel" aria-label="Loading positions" />
-                      ) : managers && managers.length ? (
-                        <label className="select">
-                          <span className="sr">Position to watch</span>
-                          <select value={watchId} onChange={(e) => selectManager(e.target.value)}>
-                            {!managers.some((m) => m.managerId === watchId) && watchId && <option value={watchId}>{short(watchId)} · pasted</option>}
-                            {managers.map((m) => (
-                              <option key={m.managerId} value={m.managerId}>
-                                {short(m.managerId)} · ratio {m.riskRatio >= 1000 ? '1000 (max)' : m.riskRatio.toFixed(3)} · {ago(m.lastActivity)}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      ) : (
-                        !errors.managers && <p className="fine">No recent SUI/USDC positions found.</p>
-                      )}
+            <div className="duo">
+              {/* (2) Position facts */}
+              <section className="card mini-card" aria-labelledby="pos-title" data-film="position-card">
+                <div className="mini-head">
+                  <h2 id="pos-title">{source === 'watch' ? 'Watched position' : 'Your position'}</h2>
+                  {visiblePosition?.managerId &&
+                    (fork ? (
+                      <span className="ext" title={`${visiblePosition.managerId} (local fork; not on Suiscan)`}>
+                        <span className="mono">{short(visiblePosition.managerId)}</span> <ForkTag />
+                      </span>
+                    ) : (
+                      <a className="ext" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${visiblePosition.managerId}`} data-film="suiscan">
+                        SuiScan <ArrowOut />
+                      </a>
+                    ))}
+                </div>
+                {source === 'watch' && (
+                  <div className="picker">
+                    {managers === null && !errors.managers ? (
+                      <span className="skeleton picker-skel" aria-label="Loading positions" />
+                    ) : managers && managers.length ? (
+                      <label className="select">
+                        <span className="sr">Position to watch</span>
+                        <select value={watchId} onChange={(e) => selectManager(e.target.value)}>
+                          {!managers.some((m) => m.managerId === watchId) && watchId && <option value={watchId}>{short(watchId)} · pasted</option>}
+                          {managers.map((m) => (
+                            <option key={m.managerId} value={m.managerId}>
+                              {short(m.managerId)} · ratio {m.riskRatio >= 1000 ? '1000 (max)' : m.riskRatio.toFixed(3)} · {ago(m.lastActivity)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : (
+                      !errors.managers && <p className="fine">No recent SUI/USDC positions found.</p>
+                    )}
+                    {errors.managers && <p className="err-line">Positions: {errors.managers}</p>}
+                    <details className="paste-wrap">
+                      <summary>Paste an ID · {atLiq.length ? `${atLiq.length} at liquidation now` : 'none at liquidation now'}</summary>
                       <form
                         className="paste"
                         onSubmit={(e) => {
@@ -582,282 +664,169 @@ function App() {
                           if (pastedId.trim()) selectManager(pastedId.trim());
                         }}
                       >
-                        <input value={pastedId} onChange={(e) => setPastedId(e.target.value)} placeholder="or paste a position ID 0x…" aria-label="MarginManager ID" spellCheck={false} />
+                        <input value={pastedId} onChange={(e) => setPastedId(e.target.value)} placeholder="0x… position ID" aria-label="MarginManager ID" spellCheck={false} />
                         <button className="pill pill-line pill-sm">Watch</button>
                       </form>
-                      {errors.managers && <p className="err-line">Positions: {errors.managers}</p>}
-                      <p className="fine">
-                        Real positions, closest to liquidation first. At liquidation now:{' '}
-                        {atLiq.length ? atLiq.map((m) => `${short(m.managerId)} (${m.riskRatio.toFixed(3)})`).join(', ') : 'none in the recent live sample'}.
-                      </p>
-                    </div>
-                  )}
-
-                  {source === 'bot' && (
-                    <dl className="bot-facts">
-                      <div>
-                        <dt>Bot wallet</dt>
-                        <dd className={status?.wallet ? 'mono' : status ? 'setup' : ''}>
-                          {!status ? (
-                            '…'
-                          ) : status.wallet ? (
-                            <a href={`https://suiscan.xyz/mainnet/account/${status.wallet}`} target="_blank" rel="noreferrer">
-                              {short(status.wallet)} <ArrowOut />
-                            </a>
-                          ) : (
-                            'Setup required'
-                          )}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>SUI</dt>
-                        <dd>{status?.balanceMist ? `${(Number(status.balanceMist) / 1e9).toFixed(3)} SUI` : '—'}</dd>
-                      </div>
-                      <div>
-                        <dt>USDC</dt>
-                        <dd>{status?.usdcBalance ? `${(Number(status.usdcBalance) / 1e6).toFixed(2)} USDC` : '—'}</dd>
-                      </div>
-                      <div>
-                        <dt>Sends</dt>
-                        <dd>{fork ? (fork.writes ? 'Local fork only' : 'Fork, simulate only') : status?.mainnetWrites ? 'Mainnet enabled' : 'Dry-run only'}</dd>
-                      </div>
-                    </dl>
-                  )}
-                  {source === 'bot' && status?.watcherError && !/^(Error:\s*)?Setup required/.test(status.watcherError) && (
-                    <p className="err-line">{status.watcherError.replace(/^Error:\s*/, '')}</p>
-                  )}
-
-                  {state ? (
-                    <>
-                      <div className="ratio-row">
-                        <div className="ratio" data-film="ratio">
-                          <span className="lbl">Risk ratio</span>
-                          <b className="num">{ratioText(Number(ratio))}</b>
-                          <span className="ratio-help">what it owns ÷ what it owes{Number(ratio) >= 1000 ? ' · the chain’s maximum' : ''}</span>
-                        </div>
-                        {tier && <span className={`tier tier-${tier}`}>{tierWord}</span>}
-                      </div>
-                      <RiskBar ratio={Number(ratio)} liquidation={liquidation} minBorrow={minBorrow} alert={alert} />
-                      {cushion && (
-                        <p className="cushion">
-                          {cushion.kind === 'move' ? (
-                            <>
-                              SUI can {cushion.move < 0 ? 'fall' : 'rise'} <b className="gold-num">{Math.abs(cushion.move * 100).toFixed(1)}%</b> before liquidation
-                              <span className="num"> · liquidated at SUI ${cushion.price.toFixed(4)}</span>
-                            </>
-                          ) : cushion.kind === 'at' ? (
-                            <>The ratio is at or below the liquidation line now.</>
-                          ) : (
-                            <>No SUI price move alone can liquidate this position.</>
-                          )}
-                        </p>
-                      )}
-                      <dl className="pos-kv">
-                        <Fact k="Collateral" v={fmtAmt(state.baseAsset)} unit="SUI" />
-                        <Fact k="Cash held" v={fmtAmt(state.quoteAsset)} unit="USDC" />
-                        <Fact k="Debt" v={fmtAmt(state.quoteDebt)} unit="USDC" />
-                        <Fact k="SUI price" v={visiblePosition.price != null ? `$${Number(visiblePosition.price).toFixed(4)}` : '—'} unit="USD" />
-                        {source === 'watch' && <Fact k="USDC price" v={watched.quotePrice != null ? `$${watched.quotePrice.toFixed(4)}` : '—'} unit="USD" />}
-                      </dl>
-                      <div className="pos-foot">
-                        {visiblePosition?.managerId &&
-                          (fork ? (
-                            <span className="ext" title={`${visiblePosition.managerId} (state read from the local fork; not a Suiscan link)`}>
-                              Position <span className="mono">{short(visiblePosition.managerId)}</span> <ForkTag />
-                            </span>
-                          ) : (
-                            <a className="ext" target="_blank" rel="noreferrer" href={`https://suiscan.xyz/mainnet/object/${visiblePosition.managerId}`} data-film="suiscan">
-                              Position <span className="mono">{short(visiblePosition.managerId)}</span> on SuiScan <ArrowOut />
-                            </a>
-                          ))}
-                        {visibleRegistry && (
-                          <span className="fine">
-                            Pool rules from {fork ? 'the local fork' : 'mainnet'}: liquidation {liquidation?.toFixed(2)}, minimum to borrow {minBorrow?.toFixed(4)}.
-                          </span>
-                        )}
-                      </div>
-                    </>
-                  ) : source === 'watch' && watchId && !errors.watch ? (
-                    <div className="pos-skeleton" aria-label={`Reading the position from ${where}`}>
-                      <span className="skeleton s1" />
-                      <span className="skeleton s2" />
-                      <span className="skeleton s3" />
-                      <p className="fine">
-                        Reading {short(watchId)} from {where}…
-                      </p>
-                    </div>
-                  ) : source === 'bot' ? (
-                    journey('inline')
-                  ) : (
-                    <State title="Nothing to guard yet" text={watchError || 'Pick a position above or paste its ID.'} error={!!watchError} />
-                  )}
-                  {errors.registry && source === 'bot' && <p className="err-line">Registry: {errors.registry}</p>}
-                </section>
-
-                {/* (3) Chat */}
-                <section className="card chat-card" id="chat" aria-labelledby="chat-title" data-film="chat">
-                  <div className="chat-head">
-                    <img src={AVATAR} alt="" width={44} height={44} />
-                    <div>
-                      <h2 id="chat-title">Talk to your bodyguard</h2>
-                      <p>
-                        <span className={`dot ${status?.openRouter === 'ready' ? 'ok' : 'warn'}`} aria-hidden="true" />
-                        {status?.openRouter === 'ready' ? 'Tell it your hours and rules. Every tool call shows under its answer.' : status?.openRouter ?? 'Connecting…'}
-                      </p>
-                    </div>
+                      {atLiq.length > 0 && <p className="fine">{atLiq.map((m) => `${short(m.managerId)} (${m.riskRatio.toFixed(3)})`).join(', ')}</p>}
+                    </details>
                   </div>
-                  <div className="thread" ref={thread} aria-live="polite" data-film="thread">
-                    {messages.length === 0 && (
-                      <div className="welcome">
-                        <p className="greet">Tell me when you sleep and what I may do. I’ll remember it on Walrus and keep watch.</p>
-                        <div className="chips">
-                          {STARTERS.map((s) => (
-                            <button key={s} className="chip" onClick={() => send(s)} disabled={busy}>
-                              {s}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {messages.map((m, i) => (
-                      <div className={`message ${m.role}`} key={i}>
-                        {m.role !== 'you' && <img className="avatar" src={AVATAR} alt="" width={30} height={30} />}
-                        <div className="msg-col">
-                          <div className="bubble">
-                            {m.role === 'error' && <b>Error</b>}
-                            <p>{m.role === 'error' ? m.text.replace(/^Error:\s*/, '') : m.text}</p>
-                          </div>
-                          {m.steps && m.steps.length > 0 && <Steps steps={m.steps} />}
-                          <time className="msg-time">
-                            {m.role === 'you' ? 'You' : 'Yojimbo'} · {m.at}
-                          </time>
-                        </div>
-                      </div>
-                    ))}
-                    {busy && (
-                      <div className="message yojimbo" aria-label="Yojimbo is thinking">
-                        <img className="avatar" src={AVATAR} alt="" width={30} height={30} />
-                        <div className="msg-col">
-                          <div className="bubble thinking">
-                            <span className="typing">
-                              <i />
-                              <i />
-                              <i />
-                            </span>
-                            <small>{live.length && live[live.length - 1].pending ? `Calling ${live[live.length - 1].name}…` : 'Thinking…'}</small>
-                          </div>
-                          {live.length > 0 && <Steps steps={live} />}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <form
-                    className="composer"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void send();
-                    }}
-                  >
-                    <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. I sleep 01:00 to 08:00 IST" aria-label="Message Yojimbo" data-film="composer" />
-                    <button className="pill pill-navy send" disabled={busy}>
-                      {busy ? 'Thinking…' : 'Send'}
-                    </button>
-                  </form>
-                  <details className="trace">
-                    <summary>Raw tool JSON ({trace.length})</summary>
-                    <div className="trace-body">{trace.length ? trace.map((t, i) => <pre key={i}>{JSON.stringify(t, null, 2)}</pre>) : <p>No tool calls yet.</p>}</div>
-                  </details>
-                </section>
-              </div>
-
-              {/* (2) Protection */}
-              <aside className="dash-rail">
-                <section className="card prot-card" id="protection" aria-labelledby="protection-title" data-film="protection">
-                  <div className="card-title">
-                    <div>
-                      <p className="lbl">Protection</p>
-                      <h2 id="protection-title">{guard.word}</h2>
-                    </div>
-                    <span className={`guard-dot g-${guard.tone}`} aria-hidden="true" />
-                  </div>
-                  {guard.note && <p className="prot-note">{guard.note}</p>}
-                  <dl className="prot-list">
-                    <div>
-                      <dt>Acts when</dt>
-                      <dd>
-                        risk ratio falls under <b className="num">{alert.toFixed(2)}</b>
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>What it does</dt>
-                      <dd>{memory === null && !errors.memory ? '…' : rules[0] ? `“${rules[0].memory.text}”` : memorySetup ? 'Setup required: Walrus Memory' : 'No rule yet. Tell it in chat.'}</dd>
-                    </div>
-                    <div>
-                      <dt>Max per defence</dt>
-                      <dd>
-                        {caps ? (
-                          <>
-                            <b className="gold-num num">{caps.perActionUsdc} USDC</b> · {caps.dailyUsdc} USDC a day
-                          </>
-                        ) : (
-                          '—'
-                        )}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Sleep schedule</dt>
-                      <dd>{memory === null && !errors.memory ? '…' : schedules[0] ? `“${schedules[0].memory.text}”` : memorySetup ? 'Setup required: Walrus Memory' : 'Not set yet'}</dd>
-                    </div>
-                    <div>
-                      <dt>Telegram</dt>
-                      <dd>
-                        {status ? (
-                          telegramOn ? (
-                            <>
-                              <span className="dot ok" aria-hidden="true" />
-                              {status.telegram === 'Telegram ready' ? 'Connected · @Yojimbo_robot' : status.telegram}
-                            </>
-                          ) : (
-                            <>
-                              <span className="dot warn" aria-hidden="true" />
-                              Setup required
-                            </>
-                          )
-                        ) : (
-                          '…'
-                        )}
-                      </dd>
-                    </div>
+                )}
+                {source === 'bot' && (
+                  <p className="bot-line">
+                    Bot wallet{' '}
+                    {!status ? (
+                      '…'
+                    ) : status.wallet ? (
+                      <a className="mono" href={`https://suiscan.xyz/mainnet/account/${status.wallet}`} target="_blank" rel="noreferrer">
+                        {short(status.wallet)} <ArrowOut />
+                      </a>
+                    ) : (
+                      <b className="setup">Setup required</b>
+                    )}{' '}
+                    · {status?.balanceMist ? `${(Number(status.balanceMist) / 1e9).toFixed(3)} SUI` : '— SUI'} · {status?.usdcBalance ? `${(Number(status.usdcBalance) / 1e6).toFixed(2)} USDC` : '— USDC'}
+                  </p>
+                )}
+                {source === 'bot' && status?.watcherError && !/^(Error:\s*)?Setup required/.test(status.watcherError) && <p className="err-line">{status.watcherError.replace(/^Error:\s*/, '')}</p>}
+                {state ? (
+                  <dl className="mini-kv">
+                    <Fact k="Collateral" v={fmtAmt(state.baseAsset)} unit="SUI" />
+                    <Fact k="Debt" v={fmtAmt(state.quoteDebt)} unit="USDC" />
+                    <Fact k="Cash held" v={fmtAmt(state.quoteAsset)} unit="USDC" />
+                    <Fact k="SUI price" v={visiblePosition.price != null ? `$${Number(visiblePosition.price).toFixed(4)}` : '—'} unit="USD" />
                   </dl>
-                  {visibleDecision && (
-                    <div className="now" data-film="decision">
-                      <p className="lbl">Right now</p>
-                      <p>
-                        <b>{visibleDecision.mode}</b> · would <b>{visibleDecision.action}</b>
-                        {visibleDecision.amountUsdc ? ` ${visibleDecision.amountUsdc} USDC` : ''}
-                      </p>
-                      <blockquote>“{visibleDecision.quote}”</blockquote>
-                      <small>
-                        Recalled {visibleDecision.recalledBlobIds.length} · {activeAssess?.decisionSource ?? (memorySetup ? 'Walrus Memory setup required' : 'Walrus Memory')}
-                      </small>
-                    </div>
-                  )}
-                  {state && activeId && (
-                    <div className="dry">
-                      <button className="pill pill-line pill-block" onClick={dryRunDefence} disabled={dryBusy} data-film="dry-run">
-                        {dryBusy ? 'Checking…' : 'Dry-run the defence'}
-                      </button>
-                      <span>Never sends a transaction.</span>
-                    </div>
-                  )}
-                  {dryRun && (
-                    <p className={`guardrail ${dryRun.ok ? 'ok' : 'refused'}`} role="status">
-                      <b>{dryRun.ok ? 'Dry-run result' : 'Guard rail · refused'}</b> {dryRun.text}
-                    </p>
-                  )}
-                </section>
-              </aside>
+                ) : (
+                  <p className="fine">{source === 'watch' ? (watchError ? '' : 'Reading the position…') : 'Nothing open yet.'}</p>
+                )}
+                {state && activeId && (
+                  <div className="dry">
+                    <button className="link-btn" onClick={dryRunDefence} disabled={dryBusy} data-film="dry-run">
+                      {dryBusy ? 'Checking…' : 'Dry-run a defence'}
+                    </button>
+                    <span>never sends</span>
+                  </div>
+                )}
+                {dryRun && (
+                  <p className={`guardrail ${dryRun.ok ? 'ok' : 'refused'}`} role="status">
+                    <b>{dryRun.ok ? 'Dry run' : 'Refused'}</b> {dryRun.text}
+                  </p>
+                )}
+                {errors.registry && source === 'bot' && <p className="err-line">Registry: {errors.registry}</p>}
+              </section>
+
+              {/* (3) Its rules */}
+              <section className="card mini-card" aria-labelledby="rules-title" data-film="rules">
+                <div className="mini-head">
+                  <h2 id="rules-title">Its rules</h2>
+                  <Link to="/memory" className="ext" data-film="to-memory">
+                    {memory ? `All ${kept.length} memories` : 'Memory'} <Arrow />
+                  </Link>
+                </div>
+                {memory === null && !errors.memory ? (
+                  <div className="rchips">
+                    {[0, 1, 2].map((i) => (
+                      <span key={i} className="skeleton rchip-skel" />
+                    ))}
+                  </div>
+                ) : ruleChips.length ? (
+                  <ul className="rchips">
+                    {ruleChips.map((h) => {
+                      const r = ruleView(h.memory as any);
+                      return (
+                        <li key={h.blobId} className={`rchip r-${r.icon}`} title={h.memory.text}>
+                          <RuleIcon kind={r.icon} />
+                          {r.title}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : localRules ? (
+                  <p className="fine">Rules come from the local rules file (fork), not Walrus.</p>
+                ) : (
+                  <p className="fine">{memorySetup ? 'Setup required: Walrus Memory' : errors.memory || 'No rules yet. Tell it one below.'}</p>
+                )}
+                {visibleDecision && (
+                  <p className="rnow" data-film="decision">
+                    Now: would <b>{visibleDecision.action}</b>
+                    {visibleDecision.amountUsdc ? ` ${visibleDecision.amountUsdc} USDC` : ''} · “{visibleDecision.quote}”
+                  </p>
+                )}
+              </section>
             </div>
+
+            {/* (4) Chat */}
+            <section className="card chat-card" id="chat" aria-labelledby="chat-title" data-film="chat">
+              <div className="chat-head">
+                <img src={AVATAR} alt="" width={44} height={44} />
+                <div>
+                  <h2 id="chat-title">Talk to your bodyguard</h2>
+                  <p>
+                    <span className={`dot ${status?.openRouter === 'ready' ? 'ok' : 'warn'}`} aria-hidden="true" />
+                    {status?.openRouter === 'ready' ? 'Tool calls show under each answer' : status?.openRouter ?? 'Connecting…'}
+                  </p>
+                </div>
+              </div>
+              <div className="thread" ref={thread} aria-live="polite" data-film="thread">
+                {messages.length === 0 && (
+                  <div className="welcome">
+                    <p className="greet">Tell me when you sleep and what I may do.</p>
+                    <div className="chips">
+                      {STARTERS.map((s) => (
+                        <button key={s} className="chip" onClick={() => send(s)} disabled={busy}>
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {messages.map((m, i) => (
+                  <div className={`message ${m.role}`} key={i}>
+                    {m.role !== 'you' && <img className="avatar" src={AVATAR} alt="" width={30} height={30} />}
+                    <div className="msg-col">
+                      <div className="bubble">
+                        {m.role === 'error' && <b>Error</b>}
+                        <p>{m.role === 'error' ? m.text.replace(/^Error:\s*/, '') : m.text}</p>
+                      </div>
+                      {m.steps && m.steps.length > 0 && <Steps steps={m.steps} />}
+                      <time className="msg-time">
+                        {m.role === 'you' ? 'You' : 'Yojimbo'} · {m.at}
+                      </time>
+                    </div>
+                  </div>
+                ))}
+                {busy && (
+                  <div className="message yojimbo" aria-label="Yojimbo is thinking">
+                    <img className="avatar" src={AVATAR} alt="" width={30} height={30} />
+                    <div className="msg-col">
+                      <div className="bubble thinking">
+                        <span className="typing">
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                        <small>{live.length && live[live.length - 1].pending ? `Calling ${live[live.length - 1].name}…` : 'Thinking…'}</small>
+                      </div>
+                      {live.length > 0 && <Steps steps={live} />}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <form
+                className="composer"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void send();
+                }}
+              >
+                <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. I sleep 01:00 to 08:00 IST" aria-label="Message Yojimbo" data-film="composer" />
+                <button className="pill pill-navy send" disabled={busy}>
+                  {busy ? 'Thinking…' : 'Send'}
+                </button>
+              </form>
+              <details className="trace">
+                <summary>Raw tool JSON ({trace.length})</summary>
+                <div className="trace-body">{trace.length ? trace.map((t, i) => <pre key={i}>{JSON.stringify(t, null, 2)}</pre>) : <p>No tool calls yet.</p>}</div>
+              </details>
+            </section>
           </div>
         )}
 
@@ -867,11 +836,7 @@ function App() {
               <div>
                 <p className="lbl">{localRules ? 'Local rules file (fork)' : 'Walrus mainnet'}</p>
                 <h1>What it remembers</h1>
-                <p className="dash-sub">
-                  {localRules
-                    ? 'Read from docs/fork-rules.json on this machine. This is not Walrus Memory.'
-                    : 'Every hour, rule and correction you gave it, each stored on Walrus. Forgotten ones stay visible, struck through.'}
-                </p>
+                <p className="dash-sub">{localRules ? 'Read from docs/fork-rules.json on this machine. This is not Walrus Memory.' : 'Your hours, your rules and what you told it to forget. Each one is a Walrus blob.'}</p>
               </div>
               <button className="pill pill-navy pill-sm" onClick={() => toChat()}>
                 Tell it a rule
@@ -885,7 +850,7 @@ function App() {
                 </div>
                 <div>
                   <dt>In use</dt>
-                  <dd>{kept.filter((h) => !gone.has(h.memory.id) && h.memory.kind !== 'retire').length}</dd>
+                  <dd>{liveHits.length}</dd>
                 </div>
                 <div>
                   <dt>Forgotten</dt>
@@ -893,67 +858,157 @@ function App() {
                 </div>
               </dl>
             )}
-            {visibleDecision && (
-              <p className="recalled card">
-                <b>Last recall: {visibleDecision.recalledBlobIds.length} memories</b>
-                <span>
-                  next move: {visibleDecision.action} · “{visibleDecision.quote}”
-                </span>
-              </p>
-            )}
             {errors.memory && <State title="Couldn’t read memories" text={errors.memory} error />}
-            <section className="card" id="memory" aria-labelledby="memory-title" data-film="memories">
-              <div className="card-title">
-                <div>
-                  <h2 id="memory-title">Memories</h2>
-                  <p>Newest first. Each one links to its Walrus blob.</p>
-                </div>
+            {memory === null && !errors.memory ? (
+              <div className="mem-grid">
+                {[0, 1, 2, 3].map((i) => (
+                  <span key={i} className="skeleton mem-skel" />
+                ))}
               </div>
-              {memory === null && !errors.memory ? (
-                <div className="mem-grid">
-                  {[0, 1, 2, 3].map((i) => (
-                    <span key={i} className="skeleton mem-skel" />
-                  ))}
-                </div>
-              ) : kept.length ? (
-                <div className="mem-grid memories">
-                  {[...kept]
-                    .sort((a, b) => String(b.memory.createdAt).localeCompare(String(a.memory.createdAt)))
-                    .map((h) => {
-                      const old = h.memory.supersedes ? hits.find((x) => x.memory.id === h.memory.supersedes) : undefined;
-                      const forgotten = gone.has(h.memory.id);
-                      return (
-                        <article className={`memory kind-${h.memory.kind}${forgotten ? ' forgotten' : ''}`} key={h.blobId} data-film={forgotten ? 'memory-forgotten' : 'memory'}>
-                          <div className="mem-top">
-                            <span className="mem-tag">{forgotten ? 'Forgotten · no longer used' : KIND_LABEL[h.memory.kind] ?? h.memory.kind}</span>
-                            <time dateTime={h.memory.createdAt}>{ago(h.memory.createdAt)}</time>
-                          </div>
-                          <p className="mem-text">
-                            {forgotten ? <s>{h.memory.text}</s> : h.memory.text}
-                            {h.memory.kind === 'retire' && Array.isArray(h.memory.ids) && <span className="mem-sub"> · {h.memory.ids.length} memories</span>}
-                          </p>
-                          {h.memory.supersedes && (
-                            <p className="supersedes">
-                              replaces: <s>{old?.memory.text ?? h.memory.supersedes}</s>
-                            </p>
-                          )}
-                          {h.blobId.startsWith('local-file:') ? (
-                            <span className="ext">
-                              <span className="mono">{h.blobId}</span> <ForkTag text="local file" />
+            ) : kept.length ? (
+              <div className="mem-sections" id="memory" data-film="memories">
+                {/* Schedules on the week */}
+                <section className="card" aria-labelledby="sched-title" data-film="schedules">
+                  <div className="card-title">
+                    <div>
+                      <h2 id="sched-title">Its week</h2>
+                      <p>When you sleep, fly or work, from {liveSchedules.length} schedule memories · {tzLabel(tz)}</p>
+                    </div>
+                  </div>
+                  <DayStrip schedules={liveSchedules} events={events ?? []} tz={tz} now={tick} days={7} />
+                  <ul className="sched-list">
+                    {liveSchedules
+                      .slice()
+                      .sort((a, b) => schedSortKey(a.memory).localeCompare(schedSortKey(b.memory)))
+                      .map((h) => (
+                        <li key={h.blobId} className={`sched k-${schedKind(h.memory)}`} data-film="memory">
+                          <span className="sched-kind">{schedLabel(h.memory)}</span>
+                          <span className="sched-when">{schedWhen(h.memory)}</span>
+                          <span className="sched-text">{h.memory.text}</span>
+                          <BlobLink id={h.blobId} />
+                        </li>
+                      ))}
+                  </ul>
+                </section>
+
+                {/* Rules */}
+                <section className="card" aria-labelledby="rules-title2" data-film="rule-cards">
+                  <div className="card-title">
+                    <div>
+                      <h2 id="rules-title2">Rules it follows</h2>
+                      <p>What it may do, in your words.</p>
+                    </div>
+                  </div>
+                  <div className="rule-grid">
+                    {liveRules
+                      .slice()
+                      .sort((a, b) => String(b.memory.createdAt).localeCompare(String(a.memory.createdAt)))
+                      .map((h) => {
+                        const r = ruleView(h.memory as any);
+                        const old = h.memory.supersedes ? hits.find((x) => x.memory.id === h.memory.supersedes) : undefined;
+                        return (
+                          <article key={h.blobId} className={`rule-card r-${r.icon}`} data-film="memory">
+                            <span className="rule-ic">
+                              <RuleIcon kind={r.icon} />
                             </span>
-                          ) : (
-                            <a className="ext" target="_blank" rel="noreferrer" href={`https://walruscan.com/mainnet/blob/${h.blobId}`} data-film="blob-link">
-                              Blob <span className="mono">{short(h.blobId)}</span> <ArrowOut />
-                            </a>
-                          )}
-                        </article>
-                      );
-                    })}
-                </div>
-              ) : localRules ? (
+                            <div className="rule-body">
+                              <h3>{r.title}</h3>
+                              <p>“{h.memory.text}”</p>
+                              {h.memory.kind === 'override' && (
+                                <p className="supersedes">
+                                  Your correction · replaces <s>{old?.memory.text ?? h.memory.supersedes}</s>
+                                </p>
+                              )}
+                              <div className="rule-foot">
+                                {r.facts.map((f) => (
+                                  <span key={f} className="rfact">
+                                    {f}
+                                  </span>
+                                ))}
+                                <BlobLink id={h.blobId} />
+                              </div>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    {liveRules.length === 0 && <p className="fine">No rules in use.</p>}
+                  </div>
+                </section>
+
+                {/* Corrections: what you told it to forget */}
+                {kept.some((h) => h.memory.kind === 'retire') && (
+                  <section className="card forget" aria-labelledby="forget-title" data-film="forget-moment">
+                    <div className="card-title">
+                      <div>
+                        <h2 id="forget-title">You told it to forget</h2>
+                        <p>Walrus never deletes, so forgetting is a memory too. These are no longer used.</p>
+                      </div>
+                    </div>
+                    {kept
+                      .filter((h) => h.memory.kind === 'retire')
+                      .map((h) => (
+                        <div className="forget-moment" key={h.blobId}>
+                          <div className="forget-says">
+                            <span className="forget-who">You</span>
+                            <p>“{h.memory.text}”</p>
+                            <span className="forget-meta">
+                              {ago(h.memory.createdAt)} · <BlobLink id={h.blobId} />
+                            </span>
+                          </div>
+                          <ul className="forget-list">
+                            {(h.memory.ids ?? []).map((id) => {
+                              const t = hits.find((x) => x.memory.id === id);
+                              return (
+                                <li key={id}>
+                                  <span className="forget-arrow" aria-hidden="true">
+                                    →
+                                  </span>
+                                  <s>{t?.memory.text ?? id}</s>
+                                </li>
+                              );
+                            })}
+                          </ul>
+                        </div>
+                      ))}
+                  </section>
+                )}
+
+                {/* Forgotten, collapsed */}
+                {kept.some((h) => gone.has(h.memory.id)) && (
+                  <details className="card forgotten-group" data-film="forgotten">
+                    <summary>
+                      <span>{kept.filter((h) => gone.has(h.memory.id)).length} forgotten</span>
+                      <small>Struck through, kept for the record</small>
+                    </summary>
+                    <div className="mem-grid">
+                      {kept
+                        .filter((h) => gone.has(h.memory.id))
+                        .map((h) => (
+                          <article className={`memory kind-${h.memory.kind} forgotten`} key={h.blobId} data-film="memory-forgotten">
+                            <div className="mem-top">
+                              <span className="mem-tag">Forgotten · no longer used</span>
+                              <time dateTime={h.memory.createdAt}>{ago(h.memory.createdAt)}</time>
+                            </div>
+                            <p className="mem-text">
+                              <s>{h.memory.text}</s>
+                            </p>
+                            <BlobLink id={h.blobId} />
+                          </article>
+                        ))}
+                    </div>
+                  </details>
+                )}
+                {visibleDecision && (
+                  <p className="recalled fine">
+                    Last recall: {visibleDecision.recalledBlobIds.length} memories · next move {visibleDecision.action} · “{visibleDecision.quote}”
+                  </p>
+                )}
+              </div>
+            ) : localRules ? (
+              <section className="card" id="memory" data-film="memories">
                 <div className="mem-grid memories">
                   {localRuleIds.map((id) => (
-                    <article className="memory kind-rule" key={id}>
+                    <article className="memory kind-rule" key={id} data-film="memory">
                       <div className="mem-top">
                         <span className="mem-tag">Recalled from the local rules file</span>
                       </div>
@@ -964,17 +1019,19 @@ function App() {
                     </article>
                   ))}
                 </div>
-              ) : (
-                !errors.memory && (
+              </section>
+            ) : (
+              !errors.memory && (
+                <section className="card" id="memory" data-film="memories">
                   <State
                     art="/art/yojimbo-empty-memory.webp"
                     title={memorySetup ? 'Setup required: Walrus Memory' : 'No rules yet'}
                     detail={memorySetup ? 'MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID' : undefined}
                     text="Your hours, rules and corrections are stored on Walrus. Every defence quotes the one it followed."
                   />
-                )
-              )}
-            </section>
+                </section>
+              )
+            )}
           </div>
         )}
 
@@ -1361,9 +1418,8 @@ const outcome = (r: any) => {
   return `${r.note ?? r.mode}${tx}${failed}`;
 };
 
-/** The newcomer's path, with live status on every step: fund the bot wallet, open the position, give it rules,
- * let it watch. Yojimbo acts only through its own wallet because DeepBook Margin keeps a manager's caps inside the
- * MarginManager and checks the sender, so they cannot be delegated to the user's wallet. */
+/** Setup in three lines: fund the bot wallet, open the position, tell it the rules. Yojimbo acts only through its
+ * own wallet because DeepBook Margin keeps a manager's caps inside the MarginManager and checks the sender. */
 function Journey(props: {
   variant: 'panel' | 'inline';
   status: Status | null;
@@ -1442,33 +1498,25 @@ function Journey(props: {
           <h3>Fund the bot wallet</h3>
           {chip(0)}
         </div>
-        <p className="jtext">Yojimbo acts only from its own wallet. Send it only the SUI (for fees) and USDC you allow it to risk.</p>
         {!status ? (
-          <p className="fine">Checking the bot wallet…</p>
+          <p className="fine">Checking…</p>
         ) : wallet ? (
           <>
+            <p className="jtext">Send SUI for fees and only the USDC it may risk.</p>
             <div className="addr">
               <code>{wallet}</code>
               <button className="pill pill-line pill-sm" onClick={copy}>
                 {copied ? 'Copied' : 'Copy'}
               </button>
             </div>
-            {props.fork && <p className="fine">Fork balances: funded from the fork-only hub wallet (scripts/fork-demo.sh). Nothing here is on mainnet.</p>}
-            <dl className="jbal">
-              <div>
-                <dt>SUI</dt>
-                <dd className="num">{status?.balanceMist != null ? (Number(status.balanceMist) / 1e9).toFixed(3) : '—'}</dd>
-              </div>
-              <div>
-                <dt>USDC</dt>
-                <dd className="num">{status?.usdcBalance != null ? (Number(status.usdcBalance) / 1e6).toFixed(2) : '—'}</dd>
-              </div>
-            </dl>
+            <p className="fine num">
+              Now {status.balanceMist != null ? (Number(status.balanceMist) / 1e9).toFixed(3) : '—'} SUI · {status.usdcBalance != null ? (Number(status.usdcBalance) / 1e6).toFixed(2) : '—'} USDC
+              {props.fork ? ' · fork-only hub funds' : ''}
+            </p>
           </>
         ) : (
           <p className="jsetup">
-            Setup required: <code>YOJIMBO_BOT_KEY</code>
-            <span>Create a fresh Sui key for Yojimbo alone, never your main wallet, and set it on the server.</span>
+            Setup required: <code>YOJIMBO_BOT_KEY</code> (a fresh key, never your main wallet)
           </p>
         )}
       </li>
@@ -1479,12 +1527,9 @@ function Journey(props: {
           <h3>Open the position</h3>
           {chip(1)}
         </div>
-        <p className="jtext">
-          Yojimbo {hasManager ? 'uses its MarginManager' : 'creates a MarginManager'}, deposits your USDC, borrows USDC against it and buys SUI with both: a long SUI trade.
-        </p>
         {states[1] === 'done' ? (
           <p className="jdone">
-            Open: ratio {Number(position.state.riskRatio).toFixed(3)} on {short(position.managerId)}.
+            Open at ratio {Number(position.state.riskRatio).toFixed(3)} on {short(position.managerId)}.
           </p>
         ) : (
           <>
@@ -1504,21 +1549,9 @@ function Journey(props: {
                 </span>
               </label>
             </div>
-            <dl className="preview">
-              <div>
-                <dt>Leverage</dt>
-                <dd className="num">{leverage ? `${leverage.toFixed(2)}×` : '—'}</dd>
-              </div>
-              <div>
-                <dt>Starting ratio</dt>
-                <dd className="num">{ratio ? ratio.toFixed(2) : '—'}</dd>
-              </div>
-              <div>
-                <dt>Liquidation at</dt>
-                <dd className="num">{liq != null ? liq.toFixed(2) : '—'}</dd>
-              </div>
-            </dl>
-            <p className="fine">Ratio = (deposit + borrow) ÷ borrow, before fees and slippage. 90% of the USDC buys SUI at market.</p>
+            <p className="fine num">
+              {leverage ? `${leverage.toFixed(2)}× leverage` : '—'} · starts at ratio {ratio ? ratio.toFixed(2) : '—'} · liquidation {liq != null ? liq.toFixed(2) : '—'}
+            </p>
             {problem && <p className="err-line">{problem}</p>}
             <button className="pill pill-navy" onClick={open} disabled={!wallet || !!problem || run?.busy} data-film="open-position">
               {!status ? 'Checking…' : !wallet ? 'Setup required: YOJIMBO_BOT_KEY' : run?.busy ? 'Building…' : hasManager ? 'Open the position' : 'Create manager and open'}
@@ -1542,16 +1575,13 @@ function Journey(props: {
           <h3>Tell it your rules</h3>
           {chip(2)}
         </div>
-        <p className="jtext">Say when you sleep and what it may do. Each one is {props.localRules ? 'recalled' : 'kept on Walrus'} and quoted when Yojimbo acts.</p>
         {props.localRules ? (
-          <p className="fine">On this fork the rules come from the local rules file docs/fork-rules.json, not Walrus Memory.</p>
-        ) : (
-          props.memorySetup && (
-            <p className="jsetup">
-              Setup required: <code>MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID</code>
-            </p>
-          )
-        )}
+          <p className="fine">On this fork the rules come from docs/fork-rules.json, not Walrus Memory.</p>
+        ) : props.memorySetup ? (
+          <p className="jsetup">
+            Setup required: <code>MEMWAL_MAINNET_KEY / MEMWAL_MAINNET_ACCOUNT_ID</code>
+          </p>
+        ) : null}
         <div className="chips">
           {RULE_CHIPS.map((c) => (
             <button key={c} className="chip" onClick={() => props.onRules(c)} disabled={props.busy}>
@@ -1560,32 +1590,324 @@ function Journey(props: {
           ))}
         </div>
       </li>
-
-      <li className={`jstep s-${states[3]}`}>
-        <div className="jhead">
-          <span className="jnum">4</span>
-          <h3>It keeps watch</h3>
-          {chip(3)}
-        </div>
-        <p className="jtext">
-          Every 15 s it reads the position. When a rule fires it adds collateral, trims with a reduce-only order or repays debt, never above{' '}
-          {caps ? `${caps.perActionUsdc} USDC a defence and ${caps.dailyUsdc} USDC a day` : 'your caps'}. While you’re awake it asks first.
-        </p>
-        <p className="fine">
-          Now:{' '}
-          {status
-            ? props.fork
-              ? props.fork.writes
-                ? 'real transactions on the local fork only, never mainnet'
-                : 'simulated on the local fork, nothing is sent'
-              : status.mainnetWrites
-                ? 'mainnet sends enabled'
-                : 'dry-run only, nothing is sent'
-            : 'connecting'}{' '}
-          · alerts {status?.telegram?.startsWith('Setup') ? 'in this page only (Telegram not set up)' : 'here and on Telegram'}.
-        </p>
-      </li>
     </ol>
+  );
+}
+
+const SETUP_SHORT = ['Fund', 'Open', 'Rules'];
+const SETUP_NEXT = ['fund the bot wallet', 'open the position', 'tell it your rules'];
+const POSE = {
+  seated: { src: '/art/yojimbo-guardian-seated.webp', alt: 'The guardian sits at rest' },
+  alert: { src: '/art/yojimbo-guardian-alert.webp', alt: 'The guardian rises, hand on his sword' },
+};
+
+/* ---------- schedules and rules, from the structured Walrus memories ---------- */
+type SchedMem = { kind: 'schedule'; id: string; createdAt: string; text: string; recurrence: 'daily' | 'weekdays' | 'weekends' | 'once'; start: string; end: string; timezone: string; mode: string };
+type SchedHit = { blobId: string; memory: SchedMem };
+const posNum = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+const mostCommon = (xs: string[]) => {
+  const c = new Map<string, number>();
+  xs.forEach((x) => c.set(x, (c.get(x) ?? 0) + 1));
+  return [...c.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+};
+const tzLabel = (tz: string) => (tz === 'Asia/Kolkata' ? 'IST' : tz === 'UTC' || tz === 'Etc/UTC' ? 'UTC' : tz.split('/').pop()!.replace(/_/g, ' '));
+const agoShort = (ms: number) => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`;
+};
+function localParts(date: Date, timeZone: string) {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+  } catch {
+    parts = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hourCycle: 'h23' }).formatToParts(date);
+  }
+  const get = (n: string) => parts.find((p) => p.type === n)?.value ?? '';
+  return { minutes: Number(get('hour')) * 60 + Number(get('minute')), weekday: get('weekday'), day: `${get('year')}-${get('month')}-${get('day')}`, dom: Number(get('day')) };
+}
+const hmToMin = (v: string) => {
+  const m = /(\d{2}):(\d{2})/.exec(v);
+  if (!m) return null;
+  const n = Number(m[1]) * 60 + Number(m[2]);
+  return n === 1439 ? 1440 : n;
+};
+/** The minutes of one local day a schedule covers, the same windows scheduleActive() uses on the server. */
+function segmentsFor(s: SchedMem, day: string, weekday: string, prevWeekday: string): [number, number][] {
+  if (s.recurrence === 'once') {
+    const start = s.start.slice(0, 16),
+      end = s.end.slice(0, 16),
+      ds = `${day}T00:00`,
+      de = `${day}T24:00`;
+    if (end <= ds || start >= de) return [];
+    const a = start > ds ? hmToMin(start.slice(11)) : 0;
+    const b = end < de ? hmToMin(end.slice(11)) : 1440;
+    return a == null || b == null || b <= a ? [] : [[a, b]];
+  }
+  const a = hmToMin(s.start),
+    b = hmToMin(s.end);
+  if (a == null || b == null) return [];
+  const ok = (wd: string) => s.recurrence === 'daily' || (s.recurrence === 'weekends') === ['Sat', 'Sun'].includes(wd);
+  if (a < b) return ok(weekday) ? [[a, b]] : [];
+  return [...(ok(prevWeekday) && b > 0 ? [[0, b] as [number, number]] : []), ...(ok(weekday) ? [[a, 1440] as [number, number]] : [])];
+}
+const schedKind = (s: SchedMem) =>
+  /sleep|asleep|night|bed/i.test(s.text) ? 'sleep' : /fli|fly|plane|travel/i.test(s.text) ? 'flight' : /record|build|work|meeting|busy/i.test(s.text) ? 'busy' : s.recurrence === 'weekends' ? 'weekend' : 'away';
+const KIND_WORD: Record<string, string> = { sleep: 'Asleep', flight: 'Flying', busy: 'Busy', weekend: 'Weekend', away: 'Away' };
+const schedLabel = (s: SchedMem) => (schedKind(s) === 'busy' && /record/i.test(s.text) ? 'Recording' : KIND_WORD[schedKind(s)]);
+const schedWhen = (s: SchedMem) => {
+  const mode = s.mode === 'guard-alone' ? 'guards alone' : 'asks first';
+  const z = tzLabel(s.timezone);
+  if (s.recurrence === 'once') {
+    const d = new Date(`${s.start.slice(0, 10)}T12:00:00Z`);
+    const day = Number.isNaN(d.getTime()) ? s.start.slice(0, 10) : d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+    return `${day}, ${s.start.slice(11, 16)}–${s.end.slice(11, 16)} ${z} · ${mode}`;
+  }
+  const allDay = s.start === '00:00' && (s.end === '23:59' || s.end === '24:00');
+  const rec = s.recurrence === 'daily' ? 'Every day' : s.recurrence === 'weekends' ? 'Weekends' : 'Weekdays';
+  return `${rec}, ${allDay ? 'all day' : `${s.start}–${s.end} ${z}`} · ${mode}`;
+};
+const schedSortKey = (s: SchedMem) => (s.recurrence === 'once' ? `1${s.start}` : `0${s.recurrence}${s.start}`);
+
+type RuleIconKind = 'add' | 'never-close' | 'cap' | 'trim' | 'repay';
+/** A short label and an icon per rule, from its stored fields. Unstated 0s are ignored, as in cleanRule(). */
+function ruleView(m: { kind: string; text: string; action?: string; belowRatio?: number; maxUsdc?: number; alertRatio?: number; mode?: string }): { icon: RuleIconKind; title: string; facts: string[] } {
+  const below = posNum(m.belowRatio),
+    max = posNum(m.maxUsdc),
+    alert = posNum(m.alertRatio);
+  const facts = [below ? `below ${below}` : '', max ? `max ${max} USDC` : '', alert ? `alert ${alert}` : '', m.mode ? (m.mode === 'guard-alone' ? 'guards alone' : 'asks first') : ''].filter(Boolean);
+  if (/never clos|not clos|over closing|instead of clos/i.test(m.text)) return { icon: 'never-close', title: 'Add collateral, never close', facts };
+  if (m.action === 'reduce') return { icon: 'trim', title: below ? `Below ${below}, trim the trade` : 'Trim the trade', facts };
+  if (m.action === 'repay') return { icon: 'repay', title: below ? `Below ${below}, repay debt` : 'Repay debt', facts };
+  if (max && !below) return { icon: 'cap', title: `At most ${max} USDC a defence`, facts };
+  if (below && max) return { icon: 'add', title: `Below ${below}, add up to ${max} USDC`, facts };
+  if (below) return { icon: 'add', title: `Below ${below}, add collateral`, facts };
+  return { icon: 'add', title: m.kind === 'override' ? 'Your correction' : 'Add collateral', facts };
+}
+function RuleIcon({ kind }: { kind: RuleIconKind }) {
+  const p = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+  return (
+    <svg className="ricon" width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+      {kind === 'add' && (
+        <>
+          <path {...p} d="M10 2.5 3.5 5v4.6c0 4 2.8 6.9 6.5 7.9 3.7-1 6.5-3.9 6.5-7.9V5z" />
+          <path {...p} d="M10 7v6M7 10h6" />
+        </>
+      )}
+      {kind === 'never-close' && (
+        <>
+          <rect {...p} x="4.5" y="9" width="11" height="8" rx="2" />
+          <path {...p} d="M7 9V6.5a3 3 0 0 1 6 0V9" />
+        </>
+      )}
+      {kind === 'cap' && (
+        <>
+          <path {...p} d="M3 4.5h14" />
+          <circle {...p} cx="10" cy="12" r="4.5" />
+          <path {...p} d="M10 10v4" />
+        </>
+      )}
+      {kind === 'trim' && (
+        <>
+          <circle {...p} cx="5.5" cy="14.5" r="2.5" />
+          <circle {...p} cx="14.5" cy="14.5" r="2.5" />
+          <path {...p} d="M7 12.5 15 3M13 12.5 5 3" />
+        </>
+      )}
+      {kind === 'repay' && <path {...p} d="M15.5 7H6l3-3M4.5 13H14l-3 3" />}
+    </svg>
+  );
+}
+const BlobLink = ({ id }: { id: string }) =>
+  id.startsWith('local-file:') ? (
+    <span className="ext">
+      <span className="mono">{id}</span> <ForkTag text="local file" />
+    </span>
+  ) : (
+    <a className="ext blob" target="_blank" rel="noreferrer" href={`https://walruscan.com/mainnet/blob/${id}`} data-film="blob-link">
+      Blob <span className="mono">{short(id)}</span> <ArrowOut />
+    </a>
+  );
+
+/* ---------- the gauge ---------- */
+/** A semicircle risk meter: Liquidation (at or under the pool's line), Alert (up to the line where Yojimbo acts), Safe.
+ * Log scale so the zones near liquidation stay readable; a ratio past the top (the chain caps it at 1000) pins right.
+ * The marker and number ease to each new live read. */
+function Gauge({ ratio, liquidation, actsBelow, tier, loading }: { ratio: number | null; liquidation?: number; actsBelow: number; tier: Tier | null; loading: boolean }) {
+  const liq = liquidation ?? 1.1;
+  const lo = liq * 0.9,
+    hi = Math.max(actsBelow * 2.4, liq * 3);
+  const f = (r: number) => Math.max(0, Math.min(1, (Math.log(Math.max(r, 1e-6)) - Math.log(lo)) / (Math.log(hi) - Math.log(lo))));
+  const [shown, setShown] = useState<number | null>(ratio);
+  const from = useRef<number | null>(ratio);
+  useEffect(() => {
+    if (ratio == null) {
+      setShown(null);
+      from.current = null;
+      return;
+    }
+    const start = from.current ?? lo;
+    if (RM() || start === ratio) {
+      setShown(ratio);
+      from.current = ratio;
+      return;
+    }
+    let raf = 0;
+    const t0 = performance.now();
+    const step = (t: number) => {
+      const k = Math.min(1, (t - t0) / 900);
+      const e = 1 - Math.pow(1 - k, 3);
+      const v = Math.exp(Math.log(start) + (Math.log(ratio) - Math.log(start)) * e);
+      setShown(v);
+      if (k < 1) raf = requestAnimationFrame(step);
+      else from.current = ratio;
+    };
+    raf = requestAnimationFrame(step);
+    return () => {
+      cancelAnimationFrame(raf);
+      from.current = ratio;
+    };
+  }, [ratio]);
+  const cx = 160,
+    cy = 160,
+    r = 128;
+  const pt = (q: number) => {
+    const a = Math.PI * (1 - q);
+    return [cx + r * Math.cos(a), cy - r * Math.sin(a)];
+  };
+  const arc = (q1: number, q2: number) => {
+    const [x1, y1] = pt(q1),
+      [x2, y2] = pt(q2);
+    return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 0 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
+  };
+  const fl = f(liq),
+    fa = f(actsBelow);
+  const m = shown != null ? pt(f(shown)) : null;
+  const tickAt = (q: number, label: string) => {
+    const a = Math.PI * (1 - q);
+    const [x, y] = [cx + (r + 26) * Math.cos(a), cy - (r + 26) * Math.sin(a)];
+    return (
+      <text x={x} y={y} textAnchor="middle" dominantBaseline="middle" className="g-tick">
+        {label}
+      </text>
+    );
+  };
+  return (
+    <div className={`gauge ${tier ? `t-${tier}` : ''}`} data-film="gauge">
+      <svg viewBox="0 0 320 178" role="img" aria-label={ratio != null ? `Risk ratio ${ratioText(ratio)}. Liquidation at ${liq.toFixed(2)}, Yojimbo acts below ${actsBelow.toFixed(2)}.` : 'No position read yet'}>
+        <path d={arc(0, 1)} className="g-track" />
+        {ratio != null && (
+          <>
+            <path d={arc(0, fl)} className="g-z g-liq" />
+            <path d={arc(fl, fa)} className="g-z g-alert" />
+            <path d={arc(fa, 1)} className="g-z g-safe" />
+            {tickAt(fl, liq.toFixed(2))}
+            {tickAt(fa, actsBelow.toFixed(2))}
+          </>
+        )}
+        {m && (
+          <g className="g-mark">
+            <circle cx={m[0]} cy={m[1]} r="14" />
+            <circle cx={m[0]} cy={m[1]} r="5" className="g-mark-in" />
+          </g>
+        )}
+      </svg>
+      <div className="g-center">
+        {ratio != null ? (
+          <>
+            <b className="num" data-film="ratio">
+              {ratio >= 1000 ? '1000' : (shown ?? ratio).toFixed(3)}
+            </b>
+            <span>risk ratio{ratio >= 1000 ? ' · chain max' : ''}</span>
+          </>
+        ) : loading ? (
+          <span className="skeleton g-skel" aria-label="Reading the position" />
+        ) : (
+          <>
+            <b className="num g-none">—</b>
+            <span>no position</span>
+          </>
+        )}
+      </div>
+      {ratio != null && (
+        <div className="g-legend" aria-hidden="true">
+          <span className="lg-liq">Liquidation</span>
+          <span className="lg-alert">Alert</span>
+          <span className="lg-safe">Safe</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- the night timeline ---------- */
+/** 24 h strips from the live schedule memories, in the schedules' own time zone, with a now marker and each defence
+ * from the night log as a dot. days=1 is the Guard strip, days=7 the Memory week. */
+function DayStrip({ schedules, events, tz, now, days }: { schedules: SchedHit[]; events: EventRow[]; tz: string; now: number; days: number }) {
+  const today = localParts(new Date(now), tz);
+  const rows = Array.from({ length: days }, (_, i) => {
+    const date = new Date(now + i * 86400000);
+    const p = localParts(date, tz);
+    const prev = localParts(new Date(date.getTime() - 86400000), tz);
+    // All-day and recurring windows first, one-off windows on top: a flight or a recording session wins its hours.
+    const layer = (m: SchedMem) => (m.recurrence === 'once' ? 3 : m.start === '00:00' && (m.end === '23:59' || m.end === '24:00') ? 0 : m.recurrence === 'daily' ? 1 : 2);
+    const segs = schedules
+      .slice()
+      .sort((x, y) => layer(x.memory) - layer(y.memory))
+      .flatMap((h) => segmentsFor(h.memory, p.day, p.weekday, prev.weekday).map(([a, b]) => ({ a, b, h })));
+    const dots = events.filter((e) => localParts(new Date(e.at), tz).day === p.day).map((e) => ({ e, m: localParts(new Date(e.at), tz).minutes }));
+    return { p, segs, dots, i };
+  });
+  const nowPct = (today.minutes / 1440) * 100;
+  const active = rows[0].segs.filter((s) => today.minutes >= s.a && today.minutes < s.b).sort((x, y) => String(y.h.memory.createdAt).localeCompare(String(x.h.memory.createdAt)))[0];
+  const hhmm = `${String(Math.floor(today.minutes / 60)).padStart(2, '0')}:${String(today.minutes % 60).padStart(2, '0')}`;
+  return (
+    <div className={`strip ${days > 1 ? 'strip-week' : 'strip-day'}`} data-film="timeline">
+      {days === 1 && (
+        <p className="strip-now">
+          <b>Now {hhmm} {tzLabel(tz)}</b>
+          {active ? ` · ${schedLabel(active.h.memory).toLowerCase()} · it ${active.h.memory.mode === 'guard-alone' ? 'guards alone' : 'asks first'}` : ' · no window · it asks first'}
+        </p>
+      )}
+      <div className="strip-rows">
+        {rows.map(({ p, segs, dots, i }) => (
+          <div className="strip-row" key={p.day}>
+            {days > 1 && <span className="strip-day-l">{i === 0 ? 'Today' : `${p.weekday} ${p.dom}`}</span>}
+            <div className="strip-track">
+              {[6, 12, 18].map((h) => (
+                <span key={h} className="strip-grid" style={{ left: `${(h / 24) * 100}%` }} />
+              ))}
+              {segs.map(({ a, b, h }, k) => (
+                <span
+                  key={`${h.blobId}-${k}`}
+                  className={`seg-w k-${schedKind(h.memory)} ${h.memory.mode === 'guard-alone' ? 'm-alone' : 'm-ask'}`}
+                  style={{ left: `${(a / 1440) * 100}%`, width: `${((b - a) / 1440) * 100}%` }}
+                  title={`${schedLabel(h.memory)} · ${schedWhen(h.memory)} · “${h.memory.text}”`}
+                >
+                  {(b - a) / 1440 > (days > 1 ? 0.12 : 0.1) && <em>{schedLabel(h.memory)}</em>}
+                </span>
+              ))}
+              {dots.map(({ e, m }) => (
+                <span
+                  key={e.id}
+                  className={`strip-dot o-${/fail|error|refus/i.test(e.outcome) ? 'bad' : /dry/i.test(e.outcome) ? 'dry' : 'ok'}`}
+                  style={{ left: `${(m / 1440) * 100}%` }}
+                  title={`${e.action} ${e.amountUsdc} USDC · ratio ${e.beforeRatio.toFixed(3)} → ${e.afterRatio?.toFixed(3) ?? '—'} · ${e.outcome}`}
+                />
+              ))}
+              {i === 0 && <span className="strip-nowline" style={{ left: `${nowPct}%` }} aria-hidden="true" />}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className={`strip-axis ${days > 1 ? 'has-l' : ''}`} aria-hidden="true">
+        <span>00</span>
+        <span>06</span>
+        <span>12</span>
+        <span>18</span>
+        <span>24</span>
+      </div>
+      {schedules.length === 0 && <p className="fine">No schedule yet. Tell it when you sleep or fly.</p>}
+    </div>
   );
 }
 
@@ -1594,39 +1916,6 @@ const fmtAmt = (v: unknown) => {
   if (!Number.isFinite(n)) return String(v ?? '—');
   return n.toLocaleString('en-US', { maximumFractionDigits: n >= 100 ? 2 : 4 });
 };
-
-/** DeFi Saver-style ratio bar: liquidation on the left, your alert line, safe to the right. Linear from the pool's
- * liquidation ratio to a top that leaves room above the alert line; a ratio past the top pins to the right edge. */
-function RiskBar({ ratio, liquidation, minBorrow, alert }: { ratio: number; liquidation?: number; minBorrow?: number; alert: number }) {
-  const liq = liquidation ?? 1.1;
-  const top = Math.max(2.5, alert + 1);
-  const pct = (r: number) => Math.max(0, Math.min(100, ((r - liq) / (top - liq)) * 100));
-  const at = ratio <= liq ? 0 : pct(ratio);
-  const a = pct(alert);
-  return (
-    <div className="riskbar" data-film="risk-bar" role="img" aria-label={`Risk ratio ${ratioText(ratio)}. Liquidation at ${liquidation?.toFixed(2) ?? 'unknown'}, your alert line ${alert.toFixed(2)}.`}>
-      <div className="rb-track">
-        <span className="rb-danger" style={{ width: `${a}%` }} />
-        {minBorrow != null && <span className="rb-tick" style={{ left: `${pct(minBorrow)}%` }} title={`Minimum to borrow ${minBorrow.toFixed(2)}`} />}
-        <span className="rb-alert" style={{ left: `${a}%` }} />
-        <span className="rb-mark" style={{ left: `${at}%` }}>
-          <i />
-        </span>
-      </div>
-      <div className="rb-labels">
-        <span className="rb-l-liq">
-          <b>Liquidation</b> {liquidation?.toFixed(2) ?? '—'}
-        </span>
-        <span className="rb-l-alert" style={{ left: `${a}%` }}>
-          <b>Alert line</b> {alert.toFixed(2)}
-        </span>
-        <span className="rb-l-safe">
-          <b>Safe</b> {ratio > top ? `${top.toFixed(1)}+` : ''}
-        </span>
-      </div>
-    </div>
-  );
-}
 
 function Keys({ keys, error }: { keys: { label: string; value: string; level: string }[]; error?: string }) {
   const [open, setOpen] = useState(false);
