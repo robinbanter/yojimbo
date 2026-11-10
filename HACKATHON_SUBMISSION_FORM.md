@@ -64,7 +64,7 @@ All Sui reads and transactions go through **Tatum's Sui gRPC gateway** (`sui-mai
 
 ## Repository
 
-https://github.com/nickthelegend/yojimbo (**Nick fills / confirms**; the repo must be made public before submitting).
+https://github.com/nickthelegend/yojimbo (secret scan passed Nov 10; Nick approved making it public, flipped to public before submitting).
 
 ## Demo video
 
@@ -84,7 +84,7 @@ This is the Walrus Memory account ID. The code reads it as `MEMWAL_MAINNET_ACCOU
 
 ## Blog post
 
-[docs/BLOG.md](docs/BLOG.md). Published URL: **PENDING (Nick fills after publishing)**.
+https://github.com/nickthelegend/yojimbo/blob/main/docs/BLOG.md
 
 ## Social post (bonus)
 
