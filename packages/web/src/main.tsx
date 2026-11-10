@@ -159,6 +159,16 @@ function App() {
   const [botPositions, setBotPositions] = useState<BotPosition[] | null>(null);
   const [positionsError, setPositionsError] = useState('');
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
+  // On a fresh page the assistant opens with the bodyguard's latest defence (last 6 h) and the transaction it signed.
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !events) return;
+    seeded.current = true;
+    const e: any = events[0];
+    if (!e?.txDigest || Date.now() - new Date(e.at).getTime() > 6 * 3600_000) return;
+    const pair = String(e.pool ?? 'SUI_USDC').replace('_', '/');
+    setMessages((v) => (v.length ? v : [{ role: 'yojimbo', at: new Date(e.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), text: `My last defence: your ${pair} ${e.side ?? 'position'}, ${e.action} ${e.amountUsdc} USDC, risk ratio ${Number(e.beforeRatio).toFixed(3)} → ${e.afterRatio != null ? Number(e.afterRatio).toFixed(3) : '—'}. This is the transaction I signed.`, tx: { digest: e.txDigest, fork: /fork/i.test(String(e.outcome)) } }]));
+  }, [events]);
   const loadOrders = () => api('/orders').then((v) => setOrders(v.orders), () => {});
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMin, setChatMin] = useState(false);
