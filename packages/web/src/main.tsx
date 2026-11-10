@@ -434,17 +434,6 @@ function App() {
     </div>
   );
 
-  if (route === 'home')
-    return (
-      <div className="site">
-        <a className="skip" href="#main">
-          Skip to content
-        </a>
-        {forkBanner}
-        <Landing status={status} memoryCount={memory ? kept.length : null} memoryError={errors.memory} memorySetup={memorySetup} events={events} watched={watched} registry={registry} caps={caps} />
-      </div>
-    );
-
   // The guard at a glance, all from live state. The trigger and amount repeat the rule engine's own choice
   // (packages/core/src/policy.ts decide): the newest stated alert ratio (else the server default), and the matching
   // rule with the lowest threshold, its stated max (else 10) clamped by the server's per-defence cap.
@@ -500,6 +489,45 @@ function App() {
     .slice()
     .sort((a, b) => String(b.memory.createdAt).localeCompare(String(a.memory.createdAt)))
     .slice(0, 4);
+
+  // The cap a defence would use now, as the engine applies it: the server's per-defence cap and the tightest
+  // cap any remembered rule names.
+  const capNow = Math.min(caps?.perActionUsdc ?? Infinity, tightestCap);
+  const defenceCap = Number.isFinite(capNow) ? capNow : null;
+  const glance = (
+    <div className="glance" data-film="hero-glance">
+      <div className="glance-head">
+        <span className="lbl">
+          <span className="live-dot" aria-hidden="true" />
+          Live guard
+        </span>
+        <span className="glance-beat">{beat}</span>
+      </div>
+      <div className="glance-row">
+        <Gauge ratio={state ? Number(ratio) : null} liquidation={liquidation} actsBelow={actsBelow} tier={tier} loading={!state && !!watchId && !errors.watch} />
+        <div className="glance-text">
+          <p className={`glance-word g-${guardTone}`}>
+            {guardWord}
+            {source === 'watch' && watchId ? <small className="mono"> {short(watchId)}</small> : null}
+          </p>
+          <p className="glance-status">{memory === null && !errors.memory ? 'Reading its rules…' : statusParts.join(' · ')}</p>
+          {!state && source === 'watch' && watchError && <p className="err-line">{watchError}</p>}
+        </div>
+      </div>
+      <DayStrip schedules={liveSchedules} events={events ?? []} tz={tz} now={tick} days={1} />
+    </div>
+  );
+
+  if (route === 'home')
+    return (
+      <div className="site">
+        <a className="skip" href="#main">
+          Skip to content
+        </a>
+        {forkBanner}
+        <Landing status={status} memoryCount={memory ? kept.length : null} memoryError={errors.memory} memorySetup={memorySetup} events={events} watched={watched} registry={registry} defenceCap={defenceCap} glance={glance} />
+      </div>
+    );
 
   return (
     <div className={`app ${fork ? 'has-fork' : ''}`}>
@@ -1150,9 +1178,10 @@ function Landing(props: {
   events: EventRow[] | null;
   watched: any;
   registry: any;
-  caps?: { perActionUsdc: number; dailyUsdc: number };
+  defenceCap: number | null;
+  glance: React.ReactNode;
 }) {
-  const { status, memoryCount, events, watched, registry, caps } = props;
+  const { status, memoryCount, events, watched, registry, defenceCap } = props;
   const telegramOn = !!status && !status.telegram.startsWith('Setup');
   const mem = memoryCount == null ? (props.memoryError ? '—' : '…') : String(memoryCount);
   const price = watched?.price != null ? `$${Number(watched.price).toFixed(4)}` : '…';
@@ -1184,11 +1213,7 @@ function Landing(props: {
             <h1>
               A bodyguard for your leverage <span>while you sleep.</span>
             </h1>
-            <p className="lede">Tell it your hours and your rules in plain words. It watches your borrowed-money trade every 15 seconds and steps in before you get sold out.</p>
-            <div className="hero-num" aria-live="polite">
-              <b>{mem}</b>
-              <span>{props.memorySetup ? 'Walrus Memory setup required' : 'rules, hours and corrections it remembers · Walrus mainnet'}</span>
-            </div>
+            <p className="lede">It watches your borrowed-money trade and steps in, inside your rules, before you get sold out.</p>
             <div className="hero-cta">
               <Link to="/app" className="pill pill-navy pill-lg" data-film="hero-cta">
                 Open the app <Arrow />
@@ -1198,9 +1223,12 @@ function Landing(props: {
               </a>
             </div>
           </div>
-          <figure className="hero-frame">
-            <img src="/art/yojimbo-hero.webp" alt="A guard keeps watch on the veranda while the owner sleeps inside" width={1536} height={1024} loading="eager" />
-          </figure>
+          <div className="hero-visual">
+            <figure className="hero-frame">
+              <img src="/art/yojimbo-hero.webp" alt="A guard keeps watch on the veranda while the owner sleeps inside" width={1536} height={1024} loading="eager" />
+            </figure>
+            {props.glance}
+          </div>
         </section>
 
         <dl className="kpis" aria-label="Live numbers">
@@ -1278,7 +1306,7 @@ function Landing(props: {
               <h3>Defends inside your caps</h3>
               <p>Adds collateral or trims the trade, never above your cap, and messages you on Telegram first. Each defence quotes the rule it followed.</p>
               <div className="product-num">
-                <b>{caps ? `${caps.perActionUsdc} USDC` : '…'}</b>
+                <b>{defenceCap != null ? `${defenceCap} USDC` : '…'}</b>
                 <span>most it spends per defence</span>
               </div>
               <Link to="/log" className="pill pill-line pill-block">
