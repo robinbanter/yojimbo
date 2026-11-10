@@ -597,8 +597,10 @@ function App() {
                     <dl className="bot-facts">
                       <div>
                         <dt>Bot wallet</dt>
-                        <dd className={status?.wallet ? 'mono' : 'setup'}>
-                          {status?.wallet ? (
+                        <dd className={status?.wallet ? 'mono' : status ? 'setup' : ''}>
+                          {!status ? (
+                            '…'
+                          ) : status.wallet ? (
                             <a href={`https://suiscan.xyz/mainnet/account/${status.wallet}`} target="_blank" rel="noreferrer">
                               {short(status.wallet)} <ArrowOut />
                             </a>
@@ -788,7 +790,7 @@ function App() {
                     </div>
                     <div>
                       <dt>What it does</dt>
-                      <dd>{rules[0] ? `“${rules[0].memory.text}”` : memorySetup ? 'Setup required: Walrus Memory' : 'No rule yet. Tell it in chat.'}</dd>
+                      <dd>{memory === null && !errors.memory ? '…' : rules[0] ? `“${rules[0].memory.text}”` : memorySetup ? 'Setup required: Walrus Memory' : 'No rule yet. Tell it in chat.'}</dd>
                     </div>
                     <div>
                       <dt>Max per defence</dt>
@@ -804,7 +806,7 @@ function App() {
                     </div>
                     <div>
                       <dt>Sleep schedule</dt>
-                      <dd>{schedules[0] ? `“${schedules[0].memory.text}”` : memorySetup ? 'Setup required: Walrus Memory' : 'Not set yet'}</dd>
+                      <dd>{memory === null && !errors.memory ? '…' : schedules[0] ? `“${schedules[0].memory.text}”` : memorySetup ? 'Setup required: Walrus Memory' : 'Not set yet'}</dd>
                     </div>
                     <div>
                       <dt>Telegram</dt>
@@ -1441,7 +1443,9 @@ function Journey(props: {
           {chip(0)}
         </div>
         <p className="jtext">Yojimbo acts only from its own wallet. Send it only the SUI (for fees) and USDC you allow it to risk.</p>
-        {wallet ? (
+        {!status ? (
+          <p className="fine">Checking the bot wallet…</p>
+        ) : wallet ? (
           <>
             <div className="addr">
               <code>{wallet}</code>
@@ -1517,7 +1521,7 @@ function Journey(props: {
             <p className="fine">Ratio = (deposit + borrow) ÷ borrow, before fees and slippage. 90% of the USDC buys SUI at market.</p>
             {problem && <p className="err-line">{problem}</p>}
             <button className="pill pill-navy" onClick={open} disabled={!wallet || !!problem || run?.busy} data-film="open-position">
-              {!wallet ? 'Setup required: YOJIMBO_BOT_KEY' : run?.busy ? 'Building…' : hasManager ? 'Open the position' : 'Create manager and open'}
+              {!status ? 'Checking…' : !wallet ? 'Setup required: YOJIMBO_BOT_KEY' : run?.busy ? 'Building…' : hasManager ? 'Open the position' : 'Create manager and open'}
             </button>
             {run && run.lines.length > 0 && (
               <ul className="jrun" role="status">

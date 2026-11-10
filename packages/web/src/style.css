@@ -238,7 +238,7 @@ code { color: var(--navy-3); }
 .bot-facts div { display: grid; gap: 4px; min-width: 0; }
 .bot-facts dt { font: 700 10.5px/1.4 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .bot-facts dd { margin: 0; font-weight: 800; font-size: 15px; overflow-wrap: anywhere; }
-.bot-facts dd a { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; text-decoration: underline; text-underline-offset: 3px; }
+.bot-facts dd a { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; text-decoration: underline; text-underline-offset: 3px; }
 .bot-facts dd.setup { color: var(--seal-d); }
 .ratio-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .ratio { display: grid; gap: 6px; }
