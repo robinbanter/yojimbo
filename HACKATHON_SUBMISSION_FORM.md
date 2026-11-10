@@ -74,7 +74,7 @@ https://github.com/nickthelegend/yojimbo (**Nick fills / confirms**; the repo mu
 
 ## Tatum account ID
 
-`<TATUM_ACCOUNT_ID>`: **Nick fills.**
+`6af1b0a07614eea902da0ee6` (Nick's Tatum account, given Nov 10).
 
 ## MEMWAL_AGENT_ID
 
