@@ -32,6 +32,13 @@ export type Market = {
 const ZERO = '0x0000000000000000000000000000000000000000000000000000000000000000';
 const cache = new Map<string, { at: number; value: { markets: Market[]; notMarginEnabled: string[]; source: string; checkedAt: string } }>();
 const short = (e: unknown) => String(e instanceof Error ? e.message : e).slice(0, 160);
+const transient = (e: unknown) => /429|Timeout|timed out|ECONNRESET|fetch failed|UNAVAILABLE/i.test(String(e));
+/** Tatum rate-limits bursts (HTTP 429): retry a read up to 4 times (0.8, 1.6, 3.2, 6.4 s) before reporting it. */
+async function calm<T>(run: () => Promise<T>): Promise<T> {
+  for (let i = 0; ; i++) {
+    try { return await run(); } catch (e) { if (i >= 4 || !transient(e)) throw e; await new Promise((r) => setTimeout(r, 800 * 2 ** i)); }
+  }
+}
 
 /**
  * Every DeepBook pool the SDK knows, checked live against the mainnet MarginRegistry (read-only simulations):
@@ -48,20 +55,22 @@ export async function markets(env = process.env) {
   const db = c.client.deepbook;
   const out: Market[] = [];
   const notMarginEnabled: string[] = [];
+  let flaky = false;
   for (const [pool, info] of Object.entries(mainnetPools) as [string, { address: string; baseCoin: string; quoteCoin: string }][]) {
     let enabled = false;
-    try { enabled = await db.isPoolEnabledForMargin(pool); } catch { enabled = false; }
+    try { enabled = await calm(() => db.isPoolEnabledForMargin(pool)); } catch (e) { if (transient(e)) flaky = true; enabled = false; }
     if (!enabled) { notMarginEnabled.push(pool); continue; }
     const m: Market = { pool, base: info.baseCoin, quote: info.quoteCoin, enabled, liquidation: null, minBorrow: null, midPrice: null, lotSize: null, minSize: null, baseMarginPool: null, quoteMarginPool: null, long: { supported: false }, short: { supported: false } };
     try {
-      m.liquidation = Number(await db.getLiquidationRiskRatio(pool));
-      m.minBorrow = Number(await db.getMinBorrowRiskRatio(pool));
-      m.baseMarginPool = String(await db.getBaseMarginPoolId(pool)).replace(/^0x0x/, '0x');
-      m.quoteMarginPool = String(await db.getQuoteMarginPoolId(pool)).replace(/^0x0x/, '0x');
-      const book = await db.poolBookParams(pool);
+      m.liquidation = Number(await calm(() => db.getLiquidationRiskRatio(pool)));
+      m.minBorrow = Number(await calm(() => db.getMinBorrowRiskRatio(pool)));
+      m.baseMarginPool = String(await calm(() => db.getBaseMarginPoolId(pool))).replace(/^0x0x/, '0x');
+      m.quoteMarginPool = String(await calm(() => db.getQuoteMarginPoolId(pool))).replace(/^0x0x/, '0x');
+      const book = await calm(() => db.poolBookParams(pool));
       m.lotSize = book.lotSize; m.minSize = book.minSize;
-      try { m.midPrice = await db.midPrice(pool); } catch { m.midPrice = null; }
+      try { m.midPrice = await calm(() => db.midPrice(pool)); } catch (e) { if (transient(e)) flaky = true; m.midPrice = null; }
     } catch (e) {
+      if (transient(e)) flaky = true;
       const reason = `Could not read this pool's margin settings: ${short(e)}`;
       m.long = { supported: false, reason }; m.short = { supported: false, reason }; out.push(m); continue;
     }
@@ -74,14 +83,15 @@ export async function markets(env = process.env) {
     m.long = gateByForkFindings(pool, 'long', m.long);
     m.short = gateByForkFindings(pool, 'short', m.short);
     if (m.midPrice == null) {
-      const reason = 'The order book has no mid price right now (empty side), so a market order cannot be sized';
+      const reason = flaky ? 'Could not read the order book price just now (rate-limited); try again in a minute' : 'The order book has no mid price right now (empty side), so a market order cannot be sized';
       if (m.long.supported) m.long = { supported: false, reason };
       if (m.short.supported) m.short = { supported: false, reason };
     }
     out.push(m);
   }
   const value = { markets: out, notMarginEnabled, source: String(c.source), checkedAt: new Date().toISOString() };
-  cache.set(key, { at: Date.now(), value });
+  // A scan that hit rate limits is kept for one minute only, so the next request reads the pools again.
+  cache.set(key, { at: flaky ? Date.now() - 540_000 : Date.now(), value });
   return value;
 }
 
@@ -91,7 +101,7 @@ async function direction(db: any, coin: string, poolAddress: string, registered:
   if (!registered || /^0x0+$/.test(registered)) return { supported: false, reason: `The MarginRegistry has no ${label} lending pool registered for this pool, so ${label} cannot be borrowed` };
   if (registered.toLowerCase() !== known.address.toLowerCase()) return { supported: false, reason: `The registry's ${label} lending pool ${registered} differs from the SDK's ${known.address}` };
   try {
-    const allowed = await db.isDeepbookPoolAllowed(coin, poolAddress);
+    const allowed = await calm(() => db.isDeepbookPoolAllowed(coin, poolAddress));
     if (!allowed) return { supported: false, reason: `The ${label} margin pool does not allow borrowing for this DeepBook pool` };
   } catch (e) { return { supported: false, reason: `Could not check the ${label} margin pool: ${short(e)}` }; }
   if (!(mainnetCoins as Record<string, { priceInfoObjectId?: string }>)[coin]?.priceInfoObjectId) return { supported: false, reason: `No Pyth price object for ${coin} in the SDK, so the oracle-checked borrow cannot be built` };
