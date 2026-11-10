@@ -1,8 +1,17 @@
 import { MemWal } from '@mysten-incubation/memwal';
 import { contextQuery, decodeMemory, encodeMemory, type Context, type Hit, type Memory } from './policy.js';
 const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+/** Rate limits back off up to 4 times. A relayer timeout or dropped connection is retried quietly up to 2 times
+ * (1 s, then 2 s), so one slow preflight does not surface as a failed read. Anything else fails at once. */
+const transient = (e: unknown) => /Timeout|timed out|ETIMEDOUT|ECONNRESET|fetch failed|socket hang up/i.test(String((e as Error)?.name ?? '') + ' ' + String(e));
 async function retry<T>(run: () => Promise<T>): Promise<T> {
-  for (let i=0;;i++) { try { return await run(); } catch(e) { if (i >= 4 || !String(e).includes('429')) throw e; await delay(2000 * 2**i); } }
+  for (let i=0;;i++) {
+    try { return await run(); } catch(e) {
+      if (String(e).includes('429') && i < 4) { await delay(2000 * 2**i); continue; }
+      if (transient(e) && i < 2) { await delay(1000 * 2**i); continue; }
+      throw e;
+    }
+  }
 }
 export function memoryFor(owner: string, env = process.env) {
   if (!env.MEMWAL_MAINNET_KEY) throw new Error('Setup required: MEMWAL_MAINNET_KEY');

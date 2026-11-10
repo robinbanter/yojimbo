@@ -10,3 +10,4 @@ data/
 art-src/
 data-fork/
 .fork/
+packages/server/data-fork-*/

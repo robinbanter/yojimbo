@@ -12,10 +12,20 @@ const managersFile=resolve(dataDir,'managers.json');
 const fork=forkUrl();
 // On a LOCAL FORK the bot key is fork-only, so its own Walrus namespace is empty. YOJIMBO_FORK_MEMORY_OWNER points
 // recall at a real owner's namespace (read-only), and every write is refused so fork transactions never reach Walrus.
+// After core's quiet retries, a recall that still fails falls back to the last good recall for the same owner, so
+// a slow relayer never blanks the rules on screen or stops the watcher. With no good recall yet, the error stands.
+const lastGood=new Map<string,Hit[]>();
+const lastGoodAt=new Map<string,string>();
+async function keepGood(key:string,run:()=>Promise<Hit[]>){
+ try{const hits=await run();lastGood.set(key,hits);lastGoodAt.set(key,new Date().toISOString());return hits;}
+ catch(e){const old=lastGood.get(key);if(old){emit('status',{memoryStale:{since:lastGoodAt.get(key),error:safeError(e)}});return old;}throw e;}
+}
 function memoryOf(address:string){
- const m=memoryFor(fork&&process.env.YOJIMBO_FORK_MEMORY_OWNER?process.env.YOJIMBO_FORK_MEMORY_OWNER:address);
- if(!fork)return m;
- return {...m,remember:async(_memory:Memory):Promise<string>=>{throw new Error('Not written: LOCAL FORK runs never write Walrus memories');}};
+ const ns=fork&&process.env.YOJIMBO_FORK_MEMORY_OWNER?process.env.YOJIMBO_FORK_MEMORY_OWNER:address;
+ const m=memoryFor(ns);
+ const reads={...m,recall:(ctx:Context)=>keepGood(`${ns}:recall`,()=>m.recall(ctx)),recallQuery:(q:string)=>keepGood(`${ns}:q:${q}`,()=>m.recallQuery(q))};
+ if(!fork)return reads;
+ return {...reads,remember:async(_memory:Memory):Promise<string>=>{throw new Error('Not written: LOCAL FORK runs never write Walrus memories');}};
 }
 async function forkLabel(){if(!fork)return null;const s=await forkStatus(forkClient(fork));return {label:`${FORK_SOURCE} @ checkpoint ${s.forkedAtCheckpoint}`,forkedAtCheckpoint:s.forkedAtCheckpoint,checkpoint:s.checkpoint,clockMs:s.clockMs,writes:process.env.YOJIMBO_ALLOW_FORK_WRITES===FORK_WRITE_GATE};}
 let managersCache:{at:number;items:RecentManager[]}|null=null;
