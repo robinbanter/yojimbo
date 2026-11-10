@@ -2289,6 +2289,15 @@ function ChatDock(props: {
                 </div>
               )}
             </div>
+            {props.messages.length > 0 && !props.busy && (
+              <div className="chips dock-chips">
+                {props.starters.map((x) => (
+                  <button key={x} className="chip" onClick={() => props.send(x)}>
+                    {x}
+                  </button>
+                ))}
+              </div>
+            )}
             <form
               className="composer"
               onSubmit={(e) => {
