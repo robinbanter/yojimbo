@@ -39,8 +39,14 @@ export async function coinTotal(client: SuiGrpcClient, owner: string, coinType: 
   return total;
 }
 
+/** Total spendable balance: coin objects plus the address balance (Sui address balances hold funds outside coin objects). */
+export async function totalBalance(client: SuiGrpcClient, owner: string, coinType: string) {
+  const { balance } = await client.core.getBalance({ owner, coinType });
+  return BigInt(balance.balance);
+}
+
 export async function balances(client: SuiGrpcClient, owner: string) {
-  const [sui, usdc] = await Promise.all([coinTotal(client, owner, SUI), coinTotal(client, owner, USDC)]);
+  const [sui, usdc] = await Promise.all([totalBalance(client, owner, SUI), totalBalance(client, owner, USDC)]);
   return { owner, sui: Number(sui) / MIST, usdc: Number(usdc) / USDC_SCALAR };
 }
 
