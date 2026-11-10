@@ -63,3 +63,16 @@ test('a manager on any known pool parses with that pool key; unknown pools are d
   assert.equal(parseManagerObject(obj(mainnetPools.WAL_USDC.address), activity)?.pool, 'WAL_USDC');
   assert.equal(parseManagerObject(obj('0x' + 'c'.repeat(64)), activity), null);
 });
+
+test('a registry-allowed direction is offered only when fork-verified; others carry the fork finding', async () => {
+  const { gateByForkFindings } = await import('../src/markets.js');
+  assert.deepEqual(gateByForkFindings('SUI_USDC', 'short', { supported: true }), { supported: true });
+  const deep = gateByForkFindings('DEEP_USDC', 'long', { supported: true });
+  assert.equal(deep.supported, false);
+  assert.equal(deep.lendingPoolAllows, true);
+  assert.match(deep.reason!, /get_price_bounds/);
+  assert.match(gateByForkFindings('XBTC_USDC', 'short', { supported: true }).reason!, /check_price_is_fresh/);
+  assert.match(gateByForkFindings('NEW_USDC', 'long', { supported: true }).reason!, /not been opened/);
+  const blocked = { supported: false, reason: 'no lending pool' };
+  assert.equal(gateByForkFindings('DEEP_USDC', 'long', blocked), blocked);
+});

@@ -1,7 +1,28 @@
 import { mainnetPools, mainnetMarginPools, mainnetCoins } from '@mysten/deepbook-v3';
 import { chain } from './chain.js';
 
-export type Direction = { supported: boolean; reason?: string };
+export type Direction = { supported: boolean; reason?: string; lendingPoolAllows?: boolean };
+
+/** Pool directions opened, defended and unwound end to end on a LOCAL FORK of Sui mainnet (checkpoint 343712658). */
+export const FORK_VERIFIED = new Set(['SUI_USDC:long', 'SUI_USDC:short']);
+const stale = (feed: string) => `Borrowing aborts in pyth::check_price_is_fresh: the ${feed} Pyth price object was stale on a mainnet fork (checkpoint 343712658), and Yojimbo does not yet add a Pyth price update to the transaction`;
+const bounds = 'On a mainnet fork (checkpoint 343712658) the margin market order aborted in margin_registry::get_price_bounds (code 17); not offered until a Pyth price update in the same transaction is built and tested';
+/** What the fork run found for directions the registry allows but Yojimbo could not open. */
+export const FORK_BLOCKERS: Record<string, string> = {
+  'DEEP_USDC:long': bounds, 'DEEP_USDC:short': bounds, 'WAL_USDC:long': bounds, 'WAL_USDC:short': bounds,
+  'XBTC_USDC:long': stale('XBTC/USD'), 'XBTC_USDC:short': stale('XBTC/USD'),
+  'SUIUSDE_USDC:long': stale('SUIUSDE/USD'), 'SUIUSDE_USDC:short': stale('SUIUSDE/USD'),
+};
+/**
+ * A direction the live registry allows is offered only if it was verified on the fork; otherwise it is reported
+ * unsupported with the fork finding, keeping lendingPoolAllows:true so the reason is not mistaken for a registry block.
+ */
+export function gateByForkFindings(pool: string, side: 'long' | 'short', d: Direction): Direction {
+  if (!d.supported) return d;
+  const key = `${pool}:${side}`;
+  if (FORK_VERIFIED.has(key)) return d;
+  return { supported: false, lendingPoolAllows: true, reason: FORK_BLOCKERS[key] ?? 'The registry allows it, but it has not been opened and unwound end to end on a mainnet fork yet' };
+}
 export type Market = {
   pool: string; base: string; quote: string; enabled: boolean;
   liquidation: number | null; minBorrow: number | null; midPrice: number | null; lotSize: number | null; minSize: number | null;
@@ -50,6 +71,8 @@ export async function markets(env = process.env) {
     }
     m.long = await direction(db, 'USDC', info.address, m.quoteMarginPool, 'USDC', 'long');
     m.short = await direction(db, info.baseCoin, info.address, m.baseMarginPool, info.baseCoin, 'short');
+    m.long = gateByForkFindings(pool, 'long', m.long);
+    m.short = gateByForkFindings(pool, 'short', m.short);
     if (m.midPrice == null) {
       const reason = 'The order book has no mid price right now (empty side), so a market order cannot be sized';
       if (m.long.supported) m.long = { supported: false, reason };
