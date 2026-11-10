@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { live, cleanRule, liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, unwindPosition, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
+import { POOL, live, cleanRule, liquidationCushion, botKey, chain, executeDefence, createMarginManager, openLong, unwindPosition, memoryFor, memoryId, position, registry, decide, discoverRecentManagers, managerState, watchPosition, forkUrl, forkClient, forkStatus, forkRuleHits, FORK_SOURCE, FORK_WRITE_GATE, type RecentManager, type Context, type Decision, type Hit, type Memory, type Action } from '@yojimbo/core';
 
 const port=Number(process.env.PORT ?? 8787);
 // Fork runs keep their own event log (YOJIMBO_DATA_DIR) so fork digests never mix with mainnet history.
@@ -305,6 +305,12 @@ const server=createServer(async(req,res)=>{try{
   const calls=(t.transaction?.commands??[]).flatMap((c:any)=>c.MoveCall?[`${String(c.MoveCall.module)}::${String(c.MoveCall.function)}`]:[]);
   const objectChanges=(fx.changedObjects??[]).map((o:any)=>({type:o.idOperation==='Created'?'created':o.idOperation==='Deleted'||o.outputState==='DoesNotExist'?'deleted':'mutated',objectType:t.objectTypes?.[o.objectId]??null,objectId:o.objectId}));
   return json(res,200,{digest:t.digest,source:FORK_SOURCE,forkedAtCheckpoint:(await forkLabel())?.forkedAtCheckpoint??null,checkpoint:t.checkpoint!=null?String(t.checkpoint):null,timestampMs:t.timestampMs??null,sender:t.transaction?.sender??null,status:{status:t.status?.success?'success':'failure',error:t.status?.error?String(typeof t.status.error==='object'?JSON.stringify(t.status.error):t.status.error):undefined},gasMist:Number(gas.computationCost??0)+Number(gas.storageCost??0)-Number(gas.storageRebate??0),calls,balanceChanges:(t.balanceChanges??[]).map((x:any)=>({owner:x.address??'shared',coinType:x.coinType,amount:String(x.amount)})),objectChanges});
+ }
+ // The trade ticket's live numbers: the SUI/USDC pool's mid price and lot rules, from the same transport as every read.
+ if(path==='/quote'){
+  const c=chain(process.env.YOJIMBO_BOT_KEY?owner():'0x0000000000000000000000000000000000000000000000000000000000000000');
+  const [mid,book]=await Promise.all([c.client.deepbook.midPrice(POOL),c.client.deepbook.poolBookParams(POOL)]);
+  return json(res,200,{pool:POOL,midPrice:mid,lotSize:book.lotSize,minSize:book.minSize,source:c.source,at:new Date().toISOString()});
  }
  if(path==='/position')return json(res,200,await position(owner()));
  if(path==='/memory'&&process.env.YOJIMBO_BOT_KEY&&!memoryReady()&&fork&&process.env.YOJIMBO_FORK_RULES){const address=owner();const hits=await forkRuleHits(resolve(process.cwd(),'../..',process.env.YOJIMBO_FORK_RULES));let currentDecision:Decision|null=null;try{const {ctx}=await context(address);currentDecision=decide(hits,ctx);}catch{}return json(res,200,{hits,decision:currentDecision,source:'local-file',setup:'Setup required: Walrus Memory'});}
