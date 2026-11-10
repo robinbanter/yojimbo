@@ -271,6 +271,7 @@ code { color: var(--navy-3); }
 .g-tick { font: 700 10.5px/1 var(--mono); fill: var(--muted); }
 .g-mark circle { fill: var(--white); stroke: var(--navy); stroke-width: 5; filter: drop-shadow(0 4px 6px rgba(20, 22, 31, .3)); }
 .g-mark .g-mark-in { fill: var(--navy); stroke: none; filter: none; }
+.g-dial { position: relative; }
 .g-center { position: absolute; left: 0; right: 0; bottom: 18px; display: grid; justify-items: center; gap: 2px; text-align: center; }
 .g-center b { font-size: 64px; font-weight: 800; letter-spacing: -.055em; line-height: .95; color: var(--navy); }
 .g-center b.g-none { color: var(--line-3); }

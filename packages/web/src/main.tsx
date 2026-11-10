@@ -2203,6 +2203,7 @@ function Gauge({ ratio: raw, noDebt, liquidation, actsBelow, tier, loading }: { 
   };
   return (
     <div className={`gauge ${tier ? `t-${tier}` : ''}`} data-film="gauge">
+      <div className="g-dial">
       <svg viewBox="0 0 320 178" role="img" aria-label={ratio != null ? `Risk ratio ${ratioText(ratio)}. Liquidation at ${liq.toFixed(2)}, Yojimbo acts below ${actsBelow.toFixed(2)}.` : noDebt ? 'No debt, nothing to guard' : 'No position read yet'}>
         <path d={arc(0, 1)} className="g-track" />
         {ratio != null && (
@@ -2244,6 +2245,7 @@ function Gauge({ ratio: raw, noDebt, liquidation, actsBelow, tier, loading }: { 
             <span>no position</span>
           </>
         )}
+      </div>
       </div>
       {ratio != null && (
         <p className="g-mean">
