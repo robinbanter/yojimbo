@@ -72,7 +72,7 @@ export function decide(allHits: Hit[], context: Context, alertRatio = 1.5): Deci
   const ruleCap = chosen?.maxUsdc ?? 10;
   const capRule = rules.filter(r => r.maxUsdc != null).sort((x,y)=>x.maxUsdc!-y.maxUsdc!)[0];
   const amount = capRule && capRule.maxUsdc! < ruleCap ? capRule.maxUsdc! : ruleCap;
-  const capIds = capRule && capRule.maxUsdc! < ruleCap && capRule !== source ? [capRule.id] : [];
+  const capIds = capRule && capRule.maxUsdc! < ruleCap && capRule.id !== source?.id ? [capRule.id] : [];
   return { mode, action, amountUsdc: action === 'ignore' ? 0 : amount, reason: triggered ? (source ? `Recalled ${source.kind} ${source.id}` : 'No matching recalled rule') : 'No alert threshold crossed', quote, ruleIds: source ? [...(source.kind === 'override' ? [source.supersedes,source.id] : [source.id]), ...(action === 'ignore' ? [] : capIds)] : [], recalledBlobIds: allHits.map(h=>h.blobId), timeoutAction: chosen?.defaultOnTimeout ?? 'ignore', nextWindow, alertRatio: personalAlert };
 }
 
