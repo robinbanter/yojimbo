@@ -32,13 +32,13 @@ The chat agent's tool calls stream into the UI as it works. The language model w
 
 ## How it uses Walrus Memory
 
-Each bot wallet gets its own namespace, `yojimbo-v1:<bot address>`, through the `@mysten-incubation/memwal` SDK on the mainnet relayer `relayer.memory.walrus.xyz`. Yojimbo stores four kinds of memory:
+Each bot wallet gets its own namespace, `yojimbo-v1:<bot address>`, through the `@mysten-incubation/memwal` SDK on the mainnet relayer `relayer.memory.walrus.xyz`. Yojimbo stores five kinds of memory:
 
 1. **Rules:** for example "if the risk ratio is at or below 3.2, deposit up to 5 USDC", with an alert ratio, an action, a USDC cap and a timeout default for ask-first mode.
 2. **Schedules:** recurring windows ("daily 01:00–08:00 Asia/Kolkata: guard alone"), including overnight weekday windows that carry Monday into Tuesday morning.
 3. **Overrides:** owner corrections and approvals, matched to later decisions by mode, ratio and price move. The newest similar override wins.
-5. **Forget (retire) memories:** Walrus is append-only, so "forget that rule" is itself a memory listing the retired IDs. Retired rules stop counting and show struck through in the app.
 4. **Event memories:** each defence, with the ratio before and after, SUI price and move, mode, action, outcome, digest and the IDs of the rules it followed. There is also a daily summary at the UTC date rollover.
+5. **Forget (retire) memories:** Walrus is append-only, so "forget that rule" is itself a memory listing the retired IDs. Retired rules stop counting and show struck through in the app.
 
 Before every decision, the watcher recalls schedules, rules and overrides by semantic query. Each decision shows the blob IDs it recalled. If memory is unavailable, or no recalled rule allows an action, Yojimbo does not defend. It fails closed and says **Setup required: Walrus Memory**.
 
